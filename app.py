@@ -1,18 +1,3 @@
-# streamlit_app.py
-# -------------------------------------------------------------
-# Brute Force Feature Engineering — step-by-step UI as requested
-#
-# What this app covers (exactly to your spec up to this step):
-# 1) Title + file uploader (CSV/XLS/XLSX)
-# 2) Step to drop columns (user selects multiple, press a button to apply)
-# 3) Show column dtypes; ask for categorical columns to convert to integer codes 1..k
-#    NOTE: You wrote "one hot encode" but also "convert to 1,2,3..." — that's *label encoding*,
-#    not one‑hot. Here we implement label encoding to integers (NaNs -> 0).
-# 4) Select base features (multi-select) and a single target (exactly one)
-#
-# You can continue building additional steps after this file.
-# -------------------------------------------------------------
-
 import streamlit as st  # UI framework for building the app
 import pandas as pd  # Data manipulation for CSV/Excel handling
 from typing import List, Dict  # For type hints to keep things clear
@@ -222,44 +207,148 @@ with st.expander("View column dtypes", expanded=False):
         {"column": st.session_state.df.columns, "dtype": st.session_state.df.dtypes.astype(str).values})
     st.dataframe(dtypes_table, use_container_width=True)  # Clear overview of dtypes
 
-st.subheader("Step 3: Encode Categorical Columns (to 0, 1, 2, …; NaN → next available code)")
-st.warning("⚠️ **DATA LEAKAGE WARNING**: Encoding the full dataset before train/test split can cause data leakage! For rigorous evaluation, consider splitting data first.")
-remaining_cols = [c for c in st.session_state.df.columns]  # After any drops
-# Heuristic guess for categoricals: object/category dtypes
-likely_cats = [
-    c for c in remaining_cols
-    if (st.session_state.df[c].dtype == "object") or pd.api.types.is_categorical_dtype(st.session_state.df[c])
-]
+# ---------------------------
+# Step 3 — Train/Test Split (BEFORE preprocessing)
+# ---------------------------
 
-cols_to_encode = st.multiselect(
-    "Select categorical columns to convert to integer codes",
-    options=remaining_cols,
-    default=likely_cats,  # Pre-select likely categoricals
-    help="This performs label encoding (not one-hot). Each unique value → 0..k-1; NaN → k (next available code)."
-)
+st.subheader("Step 3: Split Data (BEFORE Preprocessing to Prevent Data Leakage)")
+st.info("✅ **Best Practice**: Split data FIRST, then preprocess train/test sets separately to avoid data leakage!")
 
-apply_encode = st.button("Convert Selected Columns", disabled=(len(cols_to_encode) == 0))
-if apply_encode:
-    meta = label_encode_columns(st.session_state.df, cols_to_encode)  # Apply label encoding
-    st.session_state.encoded_cols.update(cols_to_encode)  # Track encoded columns
-    st.session_state.encoders.update(meta)  # Save mappings for transparency
-    st.success(f"Converted {len(cols_to_encode)} column(s) to integer codes.")
-    with st.expander("Show encoding mappings", expanded=False):
-        for col, info in meta.items():
-            na_msg = f"NaN → {info['na_code']}" if info['na_code'] is not None else "No missing values"
-            st.markdown(f"**{col}** — {na_msg}")
-            mapping_df = pd.DataFrame(
-                {"category": list(info["mapping"].keys()), "code": list(info["mapping"].values())})
-            st.dataframe(mapping_df, use_container_width=True)
+# Initialize session state for splits if not exists
+if 'is_data_split' not in st.session_state:
+    st.session_state.is_data_split = False
+
+if st.session_state.df is not None:
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        test_size = st.slider(
+            "Test set size", 
+            min_value=0.1, max_value=0.4, value=0.2, step=0.05,
+            help="Proportion of data to use for testing (20% is standard)"
+        )
+        
+    with col2:
+        random_state = st.number_input(
+            "Random state", 
+            value=42, step=1,
+            help="For reproducible splits"
+        )
+    
+    split_data = st.button("Split Data into Train/Test Sets", type="primary")
+    
+    if split_data:
+        try:
+            from sklearn.model_selection import train_test_split
+            
+            # Split the entire dataframe
+            df_train, df_test = train_test_split(
+                st.session_state.df, 
+                test_size=test_size, 
+                random_state=int(random_state)
+            )
+            
+            # Store splits in session state
+            st.session_state.df_train = df_train
+            st.session_state.df_test = df_test
+            st.session_state.is_data_split = True
+            st.session_state.test_size = test_size
+            
+            # Show split information
+            st.success("✅ **Data successfully split!**")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Training Set", f"{len(df_train)} samples", f"{len(df_train)/len(st.session_state.df):.1%}")
+            with col2:
+                st.metric("Test Set", f"{len(df_test)} samples", f"{len(df_test)/len(st.session_state.df):.1%}")
+            
+        except Exception as e:
+            st.error(f"Error splitting data: {str(e)}")
+
+# Show current split status
+if st.session_state.is_data_split:
+    st.success(f"✅ Data is split: {len(st.session_state.df_train)} train + {len(st.session_state.df_test)} test samples")
+    st.info("💡 Now you can safely preprocess each set separately!")
+else:
+    st.info("ℹ️ Data not yet split - complete this step to enable leak-free preprocessing")
 
 # ---------------------------
-# Step 4 — Select target first, then base features
+# Step 4 — Encode categoricals (on split data)
 # ---------------------------
-st.subheader("Step 4: Choose Target & Base Features")
-all_current = list(st.session_state.df.columns)  # Current columns after ops
 
-# Step 4a: Select target first
-st.write("**4a. Select Target Column**")
+st.subheader("Step 4: Encode Categorical Columns (Leak-Free)")
+
+if not st.session_state.is_data_split:
+    st.warning("⚠️ Please split data in Step 3 first to enable leak-free preprocessing!")
+else:
+    st.success("✅ Processing split data separately - no data leakage!")
+    
+    # Work with the training set to identify categorical columns
+    remaining_cols = [c for c in st.session_state.df_train.columns]  # After any drops
+    # Heuristic guess for categoricals: object/category dtypes
+    likely_cats = [
+        c for c in remaining_cols
+        if (st.session_state.df_train[c].dtype == "object") or pd.api.types.is_categorical_dtype(st.session_state.df_train[c])
+    ]
+
+    cols_to_encode = st.multiselect(
+        "Select categorical columns to convert to integer codes",
+        options=remaining_cols,
+        default=likely_cats,  # Pre-select likely categoricals
+        help="This performs label encoding fitted on TRAINING data only, then applied to test data."
+    )
+
+    apply_encode = st.button("Encode Columns (Leak-Free)", disabled=(len(cols_to_encode) == 0))
+    if apply_encode:
+        # Create encoders fitted only on training data
+        encoders = create_safe_encoder(st.session_state.df_train, cols_to_encode)
+        
+        # Apply encoding to both train and test sets
+        st.session_state.df_train_encoded = apply_safe_encoding(st.session_state.df_train, cols_to_encode, encoders)
+        st.session_state.df_test_encoded = apply_safe_encoding(st.session_state.df_test, cols_to_encode, encoders)
+        
+        # Track encoded columns and encoders
+        st.session_state.encoded_cols.update(cols_to_encode)
+        st.session_state.safe_encoders = encoders
+        st.session_state.is_encoded = True
+        
+        st.success(f"✅ Safely encoded {len(cols_to_encode)} column(s) - no data leakage!")
+        
+        with st.expander("Show encoding mappings (fitted on training data only)", expanded=False):
+            for col, info in encoders.items():
+                na_msg = f"NaN → {info['na_code']}" if info['na_code'] is not None else "No missing values"
+                st.markdown(f"**{col}** — {na_msg}")
+                mapping_df = pd.DataFrame(
+                    {"category": list(info["mapping"].keys()), "code": list(info["mapping"].values())})
+                st.dataframe(mapping_df, use_container_width=True)
+        
+        # Show information about unseen categories in test set
+        st.info("💡 **Unseen categories** in test set are automatically handled by assigning them to the 'unknown' code.")
+
+# Show encoding status
+if hasattr(st.session_state, 'is_encoded') and st.session_state.is_encoded:
+    st.success("✅ Data is safely encoded - ready for feature selection!")
+elif st.session_state.is_data_split:
+    st.info("ℹ️ Data is split but not yet encoded - complete encoding above")
+else:
+    st.info("ℹ️ Complete data splitting first")
+
+# ---------------------------
+# Step 5 — Select target first, then base features
+# ---------------------------
+st.subheader("Step 5: Choose Target & Base Features")
+
+# Check if data is properly prepared
+if not hasattr(st.session_state, 'is_encoded') or not st.session_state.is_encoded:
+    st.warning("⚠️ Please complete data splitting and encoding in Steps 3-4 first!")
+    st.stop()
+
+# Use the encoded training data for feature selection
+all_current = list(st.session_state.df_train_encoded.columns)  # Current columns after ops
+
+# Step 5a: Select target first
+st.write("**5a. Select Target Column**")
 
 st.session_state.target = st.selectbox(
     "Select the target column (exactly one)",  # Single selection for target
@@ -630,14 +719,20 @@ def _compute_metrics_one_fold(y_true, y_pred, proba, classes, label_kind, select
     return m
 
 
-st.subheader("Step 5: Create X and y")
+st.subheader("Step 6: Create X and y from Split Data")
 if st.session_state.target is None or len(st.session_state.base_features) == 0:
-    st.warning("Please choose base features and a single target in Step 4 to continue.")
+    st.warning("Please choose base features and a single target in Step 5 to continue.")
     st.stop()
 
-# Build X and y from the user's choices
-st.session_state.y = st.session_state.df[st.session_state.target]
-st.session_state.X_df = st.session_state.df[st.session_state.base_features].copy()
+# Build X and y from the split encoded data
+st.session_state.y_train = st.session_state.df_train_encoded[st.session_state.target]
+st.session_state.X_train_df = st.session_state.df_train_encoded[st.session_state.base_features].copy()
+st.session_state.y_test = st.session_state.df_test_encoded[st.session_state.target]
+st.session_state.X_test_df = st.session_state.df_test_encoded[st.session_state.base_features].copy()
+
+# Also keep the combined versions for cross-validation (which does its own splitting)
+st.session_state.y = pd.concat([st.session_state.y_train, st.session_state.y_test])
+st.session_state.X_df = pd.concat([st.session_state.X_train_df, st.session_state.X_test_df])
 
 # Reconfirmation printout
 with st.expander("Reconfirm selections", expanded=True):
@@ -853,7 +948,7 @@ CLASSIFICATION_MODELS = [
 ]
 REGRESSION_MODELS = ["xgboost", "lightgbm", "catboost", "lin_reg", "ridge_reg"]
 
-st.subheader("Step 8: Choose Model & Hyperparameters")
+st.subheader("Step 7: Choose Model & Hyperparameters")
 use_gpu = st.checkbox("Use GPU (if available)", value=False)
 model_list = CLASSIFICATION_MODELS if st.session_state.task_type == "classification" else REGRESSION_MODELS
 
@@ -1010,7 +1105,7 @@ if st.session_state.task_type == "classification":
         metric_pool = sorted(set(BOTH_CLF + MULTICLASS_ONLY))
         default_primary = "Macro F1"
 
-    st.subheader("Step 9: Choose Metrics (exactly 4)")
+    st.subheader("Step 8: Choose Metrics (exactly 4)")
     st.caption(f"Detected label type: **{detected_kind}** — showing relevant metrics.")
 
     primary_metric = st.selectbox("Primary metric", options=metric_pool,
@@ -1034,7 +1129,7 @@ if st.session_state.task_type == "classification":
     st.session_state.extra_metrics = extra_metrics
     st.session_state.selected_metrics = [primary_metric] + extra_metrics
 else:
-    st.subheader("Step 9: Metrics")
+    st.subheader("Step 8: Metrics")
     st.info("Regression metrics selection will be added in the next step you requested.")
 
 # ===========================
@@ -1050,7 +1145,7 @@ from sklearn.metrics import (
 from sklearn.preprocessing import label_binarize
 import numpy as np
 
-st.subheader("Step 10: Evaluate Model with Selected Metrics")
+st.subheader("Step 9: Evaluate Model with Selected Metrics")
 
 # Guardrails
 if st.session_state.task_type != "classification":
@@ -1268,9 +1363,9 @@ else:
     # ===========================
     # Step 12 — Train on all data & report metrics
     # ===========================
-    st.subheader("Step 12: Train/Test Split & Report Metrics")
+    st.subheader("Step 10: Final Model Evaluation on Test Set")
 
-    run_full = st.button("Train Model with Train/Test Split", type="primary")
+    run_full = st.button("Evaluate Final Model on Test Set", type="primary")
 
     if run_full:
         # Basic guardrails
@@ -1320,22 +1415,22 @@ else:
             # Import train_test_split for proper evaluation
             from sklearn.model_selection import train_test_split
             
-            # ⚠️ CRITICAL: Split data BEFORE any preprocessing to prevent data leakage!
-            # Get the original dataframe before any encoding was applied
-            if hasattr(st.session_state, 'original_df') and st.session_state.original_df is not None:
-                st.warning("🚨 **DATA LEAKAGE DETECTED**: Categorical encoding was applied to full dataset!")
-                st.warning("For proper evaluation, we should split data BEFORE preprocessing.")
-                st.info("Using the already-encoded data for now, but consider re-running from Step 3 with proper splitting.")
-            
-            # Split data into train/test sets (80/20 split)
-            X_train, X_test, y_train, y_test = train_test_split(
-                X, y, test_size=0.2, random_state=42, 
-                stratify=y if st.session_state.task_type == "classification" else None
-            )
+            # ✅ Use the pre-split data (no leakage!)
+            if hasattr(st.session_state, 'X_train_df') and hasattr(st.session_state, 'X_test_df'):
+                st.success("✅ **Using pre-split data - NO DATA LEAKAGE!**")
+                X_train = st.session_state.X_train_df.values
+                X_test = st.session_state.X_test_df.values
+                y_train = st.session_state.y_train.values
+                y_test = st.session_state.y_test.values
+            else:
+                st.error("❌ **Pre-split data not found!** Please complete Steps 3-6 first.")
+                st.error("The new workflow requires splitting data BEFORE preprocessing.")
+                st.stop()
 
             try:
-                st.info(f"Training model on {X_train.shape[0]} samples ({X_train.shape[0]}/{X.shape[0]} = {X_train.shape[0]/X.shape[0]:.1%} of data)")
-                st.info(f"Testing on {X_test.shape[0]} samples ({X_test.shape[0]}/{X.shape[0]} = {X_test.shape[0]/X.shape[0]:.1%} of data)")
+                total_samples = X_train.shape[0] + X_test.shape[0]
+                st.info(f"Training model on {X_train.shape[0]} samples ({X_train.shape[0]/total_samples:.1%} of data)")
+                st.info(f"Testing on {X_test.shape[0]} samples ({X_test.shape[0]/total_samples:.1%} of data)")
                 model.fit(X_train, y_train)
                 st.success("Model training completed successfully!")
             except Exception as fit_err:
