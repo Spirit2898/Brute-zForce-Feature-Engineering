@@ -1,18 +1,3 @@
-# streamlit_app.py
-# -------------------------------------------------------------
-# Brute Force Feature Engineering — step-by-step UI as requested
-#
-# What this app covers (exactly to your spec up to this step):
-# 1) Title + file uploader (CSV/XLS/XLSX)
-# 2) Step to drop columns (user selects multiple, press a button to apply)
-# 3) Show column dtypes; ask for categorical columns to convert to integer codes 1..k
-#    NOTE: You wrote "one hot encode" but also "convert to 1,2,3..." — that's *label encoding*,
-#    not one‑hot. Here we implement label encoding to integers (NaNs -> 0).
-# 4) Select base features (multi-select) and a single target (exactly one)
-#
-# You can continue building additional steps after this file.
-# -------------------------------------------------------------
-
 import streamlit as st  # UI framework for building the app
 import pandas as pd  # Data manipulation for CSV/Excel handling
 from typing import List, Dict  # For type hints to keep things clear
