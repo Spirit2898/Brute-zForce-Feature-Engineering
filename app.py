@@ -443,14 +443,49 @@ st.subheader("Step 5.5: Handle Missing Target Values")
 if hasattr(st.session_state, 'df_train_encoded') and hasattr(st.session_state, 'df_test_encoded'):
     # Check for missing values in target
     if st.session_state.target:
-        train_target_missing = st.session_state.df_train_encoded[st.session_state.target].isna().sum()
-        test_target_missing = st.session_state.df_test_encoded[st.session_state.target].isna().sum()
+        # FIXED: Check if target was encoded and handle missing values properly
+        if (st.session_state.target in st.session_state.get('encoded_cols', set()) and 
+            hasattr(st.session_state, 'safe_encoders') and 
+            st.session_state.target in st.session_state.safe_encoders):
+            
+            # Target was encoded - check for encoded missing values using na_code
+            encoder = st.session_state.safe_encoders[st.session_state.target]
+            na_code = encoder.get('na_code')
+            
+            if na_code is not None:
+                # Count rows with the na_code (encoded missing values)
+                train_target_missing = (st.session_state.df_train_encoded[st.session_state.target] == na_code).sum()
+                test_target_missing = (st.session_state.df_test_encoded[st.session_state.target] == na_code).sum()
+            else:
+                # No missing values were encoded
+                train_target_missing = 0
+                test_target_missing = 0
+        else:
+            # Target was not encoded - check for actual NaN values
+            train_target_missing = st.session_state.df_train_encoded[st.session_state.target].isna().sum()
+            test_target_missing = st.session_state.df_test_encoded[st.session_state.target].isna().sum()
+            
         total_missing = train_target_missing + test_target_missing
         
         if total_missing > 0:
             st.error(f"⚠️ **CRITICAL ISSUE**: {total_missing} missing values detected in target variable!")
             st.error(f"Training set: {train_target_missing} missing, Test set: {test_target_missing} missing")
             st.error("Cross-validation cannot proceed with missing target values.")
+            
+            # Debug information
+            with st.expander("🔍 Debug Information", expanded=False):
+                target_encoded = st.session_state.target in st.session_state.get('encoded_cols', set())
+                st.write(f"**Target column:** {st.session_state.target}")
+                st.write(f"**Target was encoded:** {target_encoded}")
+                if target_encoded and hasattr(st.session_state, 'safe_encoders'):
+                    encoder = st.session_state.safe_encoders.get(st.session_state.target, {})
+                    na_code = encoder.get('na_code')
+                    st.write(f"**Missing value code (na_code):** {na_code}")
+                    if na_code is not None:
+                        st.write(f"**Values equal to na_code in train:** {(st.session_state.df_train_encoded[st.session_state.target] == na_code).sum()}")
+                        st.write(f"**Values equal to na_code in test:** {(st.session_state.df_test_encoded[st.session_state.target] == na_code).sum()}")
+                st.write(f"**Target dtype:** {st.session_state.df_train_encoded[st.session_state.target].dtype}")
+                st.write(f"**Unique values in target:** {sorted(st.session_state.df_train_encoded[st.session_state.target].unique())}")
             
             with st.expander("🔧 Missing Target Value Solutions", expanded=True):
                 st.write("**Option 1: Remove rows with missing targets (Recommended)**")
@@ -463,12 +498,28 @@ if hasattr(st.session_state, 'df_train_encoded') and hasattr(st.session_state, '
                 
                 # Option 1: Remove missing targets
                 if st.button("Remove Rows with Missing Targets", type="primary"):
-                    # Remove missing targets from training set
-                    train_mask = ~st.session_state.df_train_encoded[st.session_state.target].isna()
-                    st.session_state.df_train_encoded = st.session_state.df_train_encoded[train_mask].reset_index(drop=True)
+                    # FIXED: Handle both encoded and non-encoded missing values
+                    if (st.session_state.target in st.session_state.get('encoded_cols', set()) and 
+                        hasattr(st.session_state, 'safe_encoders') and 
+                        st.session_state.target in st.session_state.safe_encoders):
+                        
+                        # Target was encoded - remove rows with na_code
+                        encoder = st.session_state.safe_encoders[st.session_state.target]
+                        na_code = encoder.get('na_code')
+                        
+                        if na_code is not None:
+                            train_mask = st.session_state.df_train_encoded[st.session_state.target] != na_code
+                            test_mask = st.session_state.df_test_encoded[st.session_state.target] != na_code
+                        else:
+                            train_mask = pd.Series([True] * len(st.session_state.df_train_encoded))
+                            test_mask = pd.Series([True] * len(st.session_state.df_test_encoded))
+                    else:
+                        # Target was not encoded - remove rows with NaN
+                        train_mask = ~st.session_state.df_train_encoded[st.session_state.target].isna()
+                        test_mask = ~st.session_state.df_test_encoded[st.session_state.target].isna()
                     
-                    # Remove missing targets from test set
-                    test_mask = ~st.session_state.df_test_encoded[st.session_state.target].isna()
+                    # Apply masks to remove rows
+                    st.session_state.df_train_encoded = st.session_state.df_train_encoded[train_mask].reset_index(drop=True)
                     st.session_state.df_test_encoded = st.session_state.df_test_encoded[test_mask].reset_index(drop=True)
                     
                     st.success(f"✅ Removed {total_missing} rows with missing targets!")
@@ -478,20 +529,55 @@ if hasattr(st.session_state, 'df_train_encoded') and hasattr(st.session_state, '
                 # Option 2: Impute missing targets (for classification - use mode)
                 st.write("---")
                 if st.button("Impute Missing Targets with Most Frequent Value", type="secondary"):
-                    # Calculate mode from training set only (to avoid data leakage)
-                    train_target_values = st.session_state.df_train_encoded[st.session_state.target].dropna()
-                    if len(train_target_values) > 0:
-                        mode_value = train_target_values.mode().iloc[0]
+                    # FIXED: Handle both encoded and non-encoded missing values for imputation
+                    if (st.session_state.target in st.session_state.get('encoded_cols', set()) and 
+                        hasattr(st.session_state, 'safe_encoders') and 
+                        st.session_state.target in st.session_state.safe_encoders):
                         
-                        # Impute missing values in both sets
-                        st.session_state.df_train_encoded[st.session_state.target].fillna(mode_value, inplace=True)
-                        st.session_state.df_test_encoded[st.session_state.target].fillna(mode_value, inplace=True)
+                        # Target was encoded - replace na_code with mode
+                        encoder = st.session_state.safe_encoders[st.session_state.target]
+                        na_code = encoder.get('na_code')
                         
-                        st.success(f"✅ Imputed {total_missing} missing targets with mode value: {mode_value}")
-                        st.warning("⚠️ Note: Imputing targets may affect model performance and interpretability")
-                        st.rerun()
+                        if na_code is not None:
+                            # Calculate mode from non-missing encoded values
+                            train_target_values = st.session_state.df_train_encoded[st.session_state.target]
+                            valid_values = train_target_values[train_target_values != na_code]
+                            
+                            if len(valid_values) > 0:
+                                mode_value = valid_values.mode().iloc[0]
+                                
+                                # Replace na_code with mode in both sets
+                                st.session_state.df_train_encoded.loc[
+                                    st.session_state.df_train_encoded[st.session_state.target] == na_code, 
+                                    st.session_state.target
+                                ] = mode_value
+                                st.session_state.df_test_encoded.loc[
+                                    st.session_state.df_test_encoded[st.session_state.target] == na_code, 
+                                    st.session_state.target
+                                ] = mode_value
+                                
+                                st.success(f"✅ Imputed {total_missing} missing targets with mode value: {mode_value}")
+                                st.warning("⚠️ Note: Imputing targets may affect model performance and interpretability")
+                                st.rerun()
+                            else:
+                                st.error("Cannot impute - no valid target values found in training set!")
+                        else:
+                            st.info("No missing values to impute in encoded target.")
                     else:
-                        st.error("Cannot impute - no valid target values found in training set!")
+                        # Target was not encoded - use standard fillna
+                        train_target_values = st.session_state.df_train_encoded[st.session_state.target].dropna()
+                        if len(train_target_values) > 0:
+                            mode_value = train_target_values.mode().iloc[0]
+                            
+                            # Impute missing values in both sets
+                            st.session_state.df_train_encoded[st.session_state.target].fillna(mode_value, inplace=True)
+                            st.session_state.df_test_encoded[st.session_state.target].fillna(mode_value, inplace=True)
+                            
+                            st.success(f"✅ Imputed {total_missing} missing targets with mode value: {mode_value}")
+                            st.warning("⚠️ Note: Imputing targets may affect model performance and interpretability")
+                            st.rerun()
+                        else:
+                            st.error("Cannot impute - no valid target values found in training set!")
             
             st.stop()  # Prevent further execution until missing values are handled
         else:
