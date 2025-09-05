@@ -1331,10 +1331,51 @@ else:
         with st.expander("Data Quality Report", expanded=True):
             # Check for data issues
             st.write(f"**Dataset shape:** {X.shape[0]} rows × {X.shape[1]} features")
-            st.write(f"**Target distribution:** {dict(zip(*np.unique(y, return_counts=True)))}")
+            
+            # FIXED: Handle target distribution properly for encoded vs non-encoded targets
+            if (hasattr(st.session_state, 'target') and st.session_state.target and
+                st.session_state.target in st.session_state.get('encoded_cols', set()) and
+                hasattr(st.session_state, 'safe_encoders') and 
+                st.session_state.target in st.session_state.safe_encoders):
+                
+                # Target was encoded - show encoded distribution
+                encoder = st.session_state.safe_encoders[st.session_state.target]
+                na_code = encoder.get('na_code')
+                
+                if na_code is not None:
+                    # Filter out missing values for distribution display
+                    valid_mask = y != na_code
+                    valid_y = y[valid_mask]
+                    if len(valid_y) > 0:
+                        st.write(f"**Target distribution (excluding missing):** {dict(zip(*np.unique(valid_y, return_counts=True)))}")
+                        st.write(f"**Missing values (encoded as {na_code}):** {(y == na_code).sum()} values")
+                    else:
+                        st.write(f"**Target distribution:** All values are missing (encoded as {na_code})")
+                else:
+                    st.write(f"**Target distribution:** {dict(zip(*np.unique(y, return_counts=True)))}")
+            else:
+                # Target was not encoded - show original distribution
+                st.write(f"**Target distribution:** {dict(zip(*np.unique(y, return_counts=True)))}")
 
-            # Check for class imbalance
-            unique_y, counts_y = np.unique(y, return_counts=True)
+            # Check for class imbalance (using valid values only)
+            if (hasattr(st.session_state, 'target') and st.session_state.target and
+                st.session_state.target in st.session_state.get('encoded_cols', set()) and
+                hasattr(st.session_state, 'safe_encoders') and 
+                st.session_state.target in st.session_state.safe_encoders):
+                
+                encoder = st.session_state.safe_encoders[st.session_state.target]
+                na_code = encoder.get('na_code')
+                
+                if na_code is not None:
+                    # Use only valid (non-missing) values for imbalance check
+                    valid_mask = y != na_code
+                    unique_y, counts_y = np.unique(y[valid_mask], return_counts=True)
+                else:
+                    unique_y, counts_y = np.unique(y, return_counts=True)
+            else:
+                # Target not encoded - use all values
+                unique_y, counts_y = np.unique(y, return_counts=True)
+            
             if len(unique_y) > 1:
                 min_class_ratio = min(counts_y) / sum(counts_y)
                 if min_class_ratio < 0.05:
@@ -1344,9 +1385,20 @@ else:
                 elif min_class_ratio < 0.1:
                     st.warning(f"⚠️ **CLASS IMBALANCE**: Smallest class represents {min_class_ratio:.2%} of data")
 
-            # Check for missing values
+            # Check for missing values (FIXED: Handle encoded missing values)
             n_missing_X = np.isnan(X).sum()
-            n_missing_y = pd.isna(y).sum()
+            
+            # Check target missing values properly
+            if (hasattr(st.session_state, 'target') and st.session_state.target and
+                st.session_state.target in st.session_state.get('encoded_cols', set()) and
+                hasattr(st.session_state, 'safe_encoders') and 
+                st.session_state.target in st.session_state.safe_encoders):
+                
+                encoder = st.session_state.safe_encoders[st.session_state.target]
+                na_code = encoder.get('na_code')
+                n_missing_y = (y == na_code).sum() if na_code is not None else 0
+            else:
+                n_missing_y = pd.isna(y).sum()
             
             if n_missing_X > 0:
                 st.warning(f"⚠️ **Missing values in features**: {n_missing_X} values")
@@ -1354,7 +1406,7 @@ else:
             
             if n_missing_y > 0:
                 st.warning(f"⚠️ **Missing values in target**: {n_missing_y} values")
-                st.info("Missing target values will be handled during training")
+                st.info("💡 **Action Required**: Please go to Step 5.5 to handle missing target values before proceeding with cross-validation")
                 
             if n_missing_X == 0 and n_missing_y == 0:
                 st.success("✅ **No missing values detected** - data is complete!")
