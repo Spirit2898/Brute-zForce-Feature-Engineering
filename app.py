@@ -65,12 +65,19 @@ def _load_dataframe(uploaded_file) -> pd.DataFrame:
 
 def label_encode_columns(df: pd.DataFrame, cols: List[str]) -> Dict[str, Dict]:
     """
-    Convert selected categorical columns to integer codes 0..k-1; NaNs -> -1.
+    Convert selected categorical columns to integer codes 0..k-1.
+    No missing values expected since data is pre-cleaned.
     Deterministic via pandas.factorize(sort=True).
     """
     metadata: Dict[str, Dict] = {}
     for col in cols:
-        # 0..k-1 for present categories, -1 for missing
+        # Check for any remaining NaN values (should not exist after cleaning)
+        if pd.isna(df[col]).any():
+            st.error(f"⚠️ **Unexpected missing values found in column '{col}' during encoding!**")
+            st.error("This should not happen as missing values were removed during data loading.")
+            st.stop()
+        
+        # 0..k-1 for present categories, no missing values to handle
         codes, uniques = pd.factorize(df[col], sort=True)
         df[col] = codes.astype("int64")
 
@@ -79,7 +86,7 @@ def label_encode_columns(df: pd.DataFrame, cols: List[str]) -> Dict[str, Dict]:
         metadata[col] = {
             "uniques": [str(u) for u in uniques.tolist()],
             "mapping": mapping,
-            "na_code": -1,
+            "na_code": None,  # No missing values to handle
         }
     return metadata  # Return per-column metadata
 
@@ -95,8 +102,20 @@ uploaded = st.file_uploader(
 
 if uploaded is not None and st.session_state.df is None:
     df = _load_dataframe(uploaded)  # Load the dataset into memory
-    st.session_state.df = df.copy()  # Keep a working copy to mutate safely
-    st.session_state.original_df = df.copy()  # Store a pristine copy for reference
+    
+    # Remove rows with any NaN values immediately after loading
+    original_shape = df.shape
+    df_cleaned = df.dropna()
+    cleaned_shape = df_cleaned.shape
+    
+    if original_shape[0] != cleaned_shape[0]:
+        st.warning(f"🧹 **Data Cleaning**: Removed {original_shape[0] - cleaned_shape[0]} rows with missing values")
+        st.info(f"Dataset shape: {original_shape[0]} → {cleaned_shape[0]} rows ({cleaned_shape[1]} columns)")
+    else:
+        st.success("✅ **No missing values detected** - dataset is clean!")
+    
+    st.session_state.df = df_cleaned.copy()  # Keep a working copy to mutate safely
+    st.session_state.original_df = df.copy()  # Store the original with missing values for reference
 
 # Show a quick preview if available
 if st.session_state.df is not None:
@@ -136,7 +155,7 @@ with st.expander("View column dtypes", expanded=False):
         {"column": st.session_state.df.columns, "dtype": st.session_state.df.dtypes.astype(str).values})
     st.dataframe(dtypes_table, use_container_width=True)  # Clear overview of dtypes
 
-st.subheader("Step 3: Encode Categorical Columns (to 0, 1, 2, …; NaN → -1)")
+st.subheader("Step 3: Encode Categorical Columns (to 0, 1, 2, … consecutive integers)")
 remaining_cols = [c for c in st.session_state.df.columns]  # After any drops
 # Heuristic guess for categoricals: object/category dtypes
 likely_cats = [
@@ -148,7 +167,7 @@ cols_to_encode = st.multiselect(
     "Select categorical columns to convert to integer codes",
     options=remaining_cols,
     default=likely_cats,  # Pre-select likely categoricals
-    help="This performs label encoding (not one-hot). Each unique value → 0..k-1; NaNs → -1."
+    help="This performs label encoding (not one-hot). Each unique value → 0..k-1 consecutive integers."
 )
 
 apply_encode = st.button("Convert Selected Columns", disabled=(len(cols_to_encode) == 0))
@@ -159,7 +178,7 @@ if apply_encode:
     st.success(f"Converted {len(cols_to_encode)} column(s) to integer codes.")
     with st.expander("Show encoding mappings", expanded=False):
         for col, info in meta.items():
-            st.markdown(f"**{col}** — NaN → 0")
+            st.markdown(f"**{col}** — Encoded to consecutive integers 0, 1, 2, ...")
             mapping_df = pd.DataFrame(
                 {"category": list(info["mapping"].keys()), "code": list(info["mapping"].values())})
             st.dataframe(mapping_df, use_container_width=True)
@@ -1009,11 +1028,15 @@ else:
                 elif min_class_ratio < 0.1:
                     st.warning(f"⚠️ **CLASS IMBALANCE**: Smallest class represents {min_class_ratio:.2%} of data")
 
-            # Check for missing values
+            # Check for missing values (should not exist after cleaning)
             if np.any(np.isnan(X)):
-                st.error("⚠️ **MISSING VALUES DETECTED** in features - this can cause training issues")
+                st.error("⚠️ **UNEXPECTED MISSING VALUES DETECTED** in features")
+                st.error("This should not happen as missing values were removed during data loading.")
             if np.any(pd.isna(y)):
-                st.error("⚠️ **MISSING VALUES DETECTED** in target - this will cause training to fail")
+                st.error("⚠️ **UNEXPECTED MISSING VALUES DETECTED** in target")
+                st.error("This should not happen as missing values were removed during data loading.")
+            else:
+                st.success("✅ **No missing values** - data is clean as expected!")
 
             # Check for constant features
             constant_features = []
