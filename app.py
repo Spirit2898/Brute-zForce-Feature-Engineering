@@ -1,3 +1,18 @@
+# streamlit_app.py
+# -------------------------------------------------------------
+# Brute Force Feature Engineering — step-by-step UI as requested
+#
+# What this app covers (exactly to your spec up to this step):
+# 1) Title + file uploader (CSV/XLS/XLSX)
+# 2) Step to drop columns (user selects multiple, press a button to apply)
+# 3) Show column dtypes; ask for categorical columns to convert to integer codes 1..k
+#    NOTE: You wrote "one hot encode" but also "convert to 1,2,3..." — that's *label encoding*,
+#    not one‑hot. Here we implement label encoding to integers (NaNs -> 0).
+# 4) Select base features (multi-select) and a single target (exactly one)
+#
+# You can continue building additional steps after this file.
+# -------------------------------------------------------------
+
 import streamlit as st  # UI framework for building the app
 import pandas as pd  # Data manipulation for CSV/Excel handling
 from typing import List, Dict  # For type hints to keep things clear
@@ -11,7 +26,8 @@ st.set_page_config(
 )
 
 st.title("Brute Force Feature Engineering")  # Main title exactly as requested
-st.caption("Upload → Drop Columns → Split Data → Encode Categoricals → Choose Features & Target → Handle Missing Targets → Choose Model → Choose Metrics → Train")  # Quick guide
+st.caption(
+    "Upload → Drop Columns → Encode Categoricals → Choose Base Features & Target → Cloose Model → Chose Metrics → Train")  # Quick guide
 
 # ---------------------------
 # Session state initializers
@@ -53,20 +69,20 @@ def label_encode_columns(df: pd.DataFrame, cols: List[str]) -> Dict[str, Dict]:
     Convert selected categorical columns to integer codes 0..k-1.
     Missing values get the next available code (k).
     Deterministic via pandas.factorize(sort=True).
-    
+
     ⚠️ WARNING: This function causes DATA LEAKAGE if applied to full dataset before train/test split!
     """
     metadata: Dict[str, Dict] = {}
     for col in cols:
         # Get original values to track missing values
         original_values = df[col].copy()
-        
+
         # Use factorize - it will assign -1 to NaN by default
         codes, uniques = pd.factorize(df[col], sort=True)
-        
+
         # Check if there are missing values (codes == -1)
         has_missing = (codes == -1).any()
-        
+
         if has_missing:
             # Reassign missing values to the next available code
             na_code = len(uniques)  # Next available code after 0..k-1
@@ -75,14 +91,14 @@ def label_encode_columns(df: pd.DataFrame, cols: List[str]) -> Dict[str, Dict]:
             uniques = list(uniques) + ['<MISSING>']
         else:
             na_code = None
-            
+
         df[col] = codes.astype("int64")
 
         # category -> code mapping
         mapping = {str(u): int(i) for i, u in enumerate(uniques) if u != '<MISSING>'}
         if na_code is not None:
             mapping['<MISSING>'] = na_code
-            
+
         metadata[col] = {
             "uniques": [str(u) for u in uniques],
             "mapping": mapping,
@@ -100,7 +116,7 @@ def create_safe_encoder(train_df: pd.DataFrame, cols: List[str]) -> Dict[str, Di
     for col in cols:
         # Fit encoder only on training data
         codes, uniques = pd.factorize(train_df[col], sort=True)
-        
+
         # Handle missing values
         has_missing = (codes == -1).any()
         if has_missing:
@@ -108,12 +124,12 @@ def create_safe_encoder(train_df: pd.DataFrame, cols: List[str]) -> Dict[str, Di
             uniques = list(uniques) + ['<MISSING>']
         else:
             na_code = None
-            
+
         # Create mapping
         mapping = {str(u): int(i) for i, u in enumerate(uniques) if u != '<MISSING>'}
         if na_code is not None:
             mapping['<MISSING>'] = na_code
-            
+
         encoders[col] = {
             "uniques": [str(u) for u in uniques],
             "mapping": mapping,
@@ -128,15 +144,15 @@ def apply_safe_encoding(df: pd.DataFrame, cols: List[str], encoders: Dict[str, D
     Handles unseen categories by assigning them to a special 'unknown' category.
     """
     df_encoded = df.copy()
-    
+
     for col in cols:
         if col not in encoders:
             continue
-            
+
         encoder = encoders[col]
         mapping = encoder["mapping"]
         na_code = encoder["na_code"]
-        
+
         # Create encoded column
         encoded_values = []
         for value in df[col]:
@@ -149,9 +165,9 @@ def apply_safe_encoding(df: pd.DataFrame, cols: List[str], encoders: Dict[str, D
             else:
                 # Unknown category - assign to missing/unknown code
                 encoded_values.append(na_code if na_code is not None else len(mapping))
-                
+
         df_encoded[col] = pd.Series(encoded_values, dtype="int64")
-    
+
     return df_encoded
 
 
@@ -207,148 +223,45 @@ with st.expander("View column dtypes", expanded=False):
         {"column": st.session_state.df.columns, "dtype": st.session_state.df.dtypes.astype(str).values})
     st.dataframe(dtypes_table, use_container_width=True)  # Clear overview of dtypes
 
-# ---------------------------
-# Step 3 — Train/Test Split (BEFORE preprocessing)
-# ---------------------------
+st.subheader("Step 3: Encode Categorical Columns (to 0, 1, 2, …; NaN → next available code)")
+st.warning(
+    "⚠️ **DATA LEAKAGE WARNING**: Encoding the full dataset before train/test split can cause data leakage! For rigorous evaluation, consider splitting data first.")
+remaining_cols = [c for c in st.session_state.df.columns]  # After any drops
+# Heuristic guess for categoricals: object/category dtypes
+likely_cats = [
+    c for c in remaining_cols
+    if (st.session_state.df[c].dtype == "object") or pd.api.types.is_categorical_dtype(st.session_state.df[c])
+]
 
-st.subheader("Step 3: Split Data (BEFORE Preprocessing to Prevent Data Leakage)")
-st.info("✅ **Best Practice**: Split data FIRST, then preprocess train/test sets separately to avoid data leakage!")
+cols_to_encode = st.multiselect(
+    "Select categorical columns to convert to integer codes",
+    options=remaining_cols,
+    default=likely_cats,  # Pre-select likely categoricals
+    help="This performs label encoding (not one-hot). Each unique value → 0..k-1; NaN → k (next available code)."
+)
 
-# Initialize session state for splits if not exists
-if 'is_data_split' not in st.session_state:
-    st.session_state.is_data_split = False
-
-if st.session_state.df is not None:
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        test_size = st.slider(
-            "Test set size", 
-            min_value=0.1, max_value=0.4, value=0.2, step=0.05,
-            help="Proportion of data to use for testing (20% is standard)"
-        )
-        
-    with col2:
-        random_state = st.number_input(
-            "Random state", 
-            value=42, step=1,
-            help="For reproducible splits"
-        )
-    
-    split_data = st.button("Split Data into Train/Test Sets", type="primary")
-    
-    if split_data:
-        try:
-            from sklearn.model_selection import train_test_split
-            
-            # Split the entire dataframe
-            df_train, df_test = train_test_split(
-                st.session_state.df, 
-                test_size=test_size, 
-                random_state=int(random_state)
-            )
-            
-            # Store splits in session state
-            st.session_state.df_train = df_train
-            st.session_state.df_test = df_test
-            st.session_state.is_data_split = True
-            st.session_state.test_size = test_size
-            
-            # Show split information
-            st.success("✅ **Data successfully split!**")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Training Set", f"{len(df_train)} samples", f"{len(df_train)/len(st.session_state.df):.1%}")
-            with col2:
-                st.metric("Test Set", f"{len(df_test)} samples", f"{len(df_test)/len(st.session_state.df):.1%}")
-            
-        except Exception as e:
-            st.error(f"Error splitting data: {str(e)}")
-
-# Show current split status
-if st.session_state.is_data_split:
-    st.success(f"✅ Data is split: {len(st.session_state.df_train)} train + {len(st.session_state.df_test)} test samples")
-    st.info("💡 Now you can safely preprocess each set separately!")
-else:
-    st.info("ℹ️ Data not yet split - complete this step to enable leak-free preprocessing")
+apply_encode = st.button("Convert Selected Columns", disabled=(len(cols_to_encode) == 0))
+if apply_encode:
+    meta = label_encode_columns(st.session_state.df, cols_to_encode)  # Apply label encoding
+    st.session_state.encoded_cols.update(cols_to_encode)  # Track encoded columns
+    st.session_state.encoders.update(meta)  # Save mappings for transparency
+    st.success(f"Converted {len(cols_to_encode)} column(s) to integer codes.")
+    with st.expander("Show encoding mappings", expanded=False):
+        for col, info in meta.items():
+            na_msg = f"NaN → {info['na_code']}" if info['na_code'] is not None else "No missing values"
+            st.markdown(f"**{col}** — {na_msg}")
+            mapping_df = pd.DataFrame(
+                {"category": list(info["mapping"].keys()), "code": list(info["mapping"].values())})
+            st.dataframe(mapping_df, use_container_width=True)
 
 # ---------------------------
-# Step 4 — Encode categoricals (on split data)
+# Step 4 — Select target first, then base features
 # ---------------------------
+st.subheader("Step 4: Choose Target & Base Features")
+all_current = list(st.session_state.df.columns)  # Current columns after ops
 
-st.subheader("Step 4: Encode Categorical Columns (Leak-Free)")
-
-if not st.session_state.is_data_split:
-    st.warning("⚠️ Please split data in Step 3 first to enable leak-free preprocessing!")
-else:
-    st.success("✅ Processing split data separately - no data leakage!")
-    
-    # Work with the training set to identify categorical columns
-    remaining_cols = [c for c in st.session_state.df_train.columns]  # After any drops
-    # Heuristic guess for categoricals: object/category dtypes
-    likely_cats = [
-        c for c in remaining_cols
-        if (st.session_state.df_train[c].dtype == "object") or pd.api.types.is_categorical_dtype(st.session_state.df_train[c])
-    ]
-
-    cols_to_encode = st.multiselect(
-        "Select categorical columns to convert to integer codes",
-        options=remaining_cols,
-        default=likely_cats,  # Pre-select likely categoricals
-        help="This performs label encoding fitted on TRAINING data only, then applied to test data."
-    )
-
-    apply_encode = st.button("Encode Columns (Leak-Free)", disabled=(len(cols_to_encode) == 0))
-    if apply_encode:
-        # Create encoders fitted only on training data
-        encoders = create_safe_encoder(st.session_state.df_train, cols_to_encode)
-        
-        # Apply encoding to both train and test sets
-        st.session_state.df_train_encoded = apply_safe_encoding(st.session_state.df_train, cols_to_encode, encoders)
-        st.session_state.df_test_encoded = apply_safe_encoding(st.session_state.df_test, cols_to_encode, encoders)
-        
-        # Track encoded columns and encoders
-        st.session_state.encoded_cols.update(cols_to_encode)
-        st.session_state.safe_encoders = encoders
-        st.session_state.is_encoded = True
-        
-        st.success(f"✅ Safely encoded {len(cols_to_encode)} column(s) - no data leakage!")
-        
-        with st.expander("Show encoding mappings (fitted on training data only)", expanded=False):
-            for col, info in encoders.items():
-                na_msg = f"NaN → {info['na_code']}" if info['na_code'] is not None else "No missing values"
-                st.markdown(f"**{col}** — {na_msg}")
-                mapping_df = pd.DataFrame(
-                    {"category": list(info["mapping"].keys()), "code": list(info["mapping"].values())})
-                st.dataframe(mapping_df, use_container_width=True)
-        
-        # Show information about unseen categories in test set
-        st.info("💡 **Unseen categories** in test set are automatically handled by assigning them to the 'unknown' code.")
-
-# Show encoding status
-if hasattr(st.session_state, 'is_encoded') and st.session_state.is_encoded:
-    st.success("✅ Data is safely encoded - ready for feature selection!")
-elif st.session_state.is_data_split:
-    st.info("ℹ️ Data is split but not yet encoded - complete encoding above")
-else:
-    st.info("ℹ️ Complete data splitting first")
-
-# ---------------------------
-# Step 5 — Select target first, then base features
-# ---------------------------
-st.subheader("Step 5: Choose Target & Base Features")
-
-# Check if data is properly prepared
-if not hasattr(st.session_state, 'is_encoded') or not st.session_state.is_encoded:
-    st.warning("⚠️ Please complete data splitting and encoding in Steps 3-4 first!")
-    st.stop()
-
-# Use the encoded training data for feature selection
-all_current = list(st.session_state.df_train_encoded.columns)  # Current columns after ops
-
-# Step 5a: Select target first
-st.write("**5a. Select Target Column**")
+# Step 4a: Select target first
+st.write("**4a. Select Target Column**")
 
 st.session_state.target = st.selectbox(
     "Select the target column (exactly one)",  # Single selection for target
@@ -435,159 +348,7 @@ else:
 
 
 # ===========================
-# Step 5.5 — Handle Missing Values in Target (Critical Fix)
-# ===========================
-st.subheader("Step 5.5: Handle Missing Target Values")
-
-# Check if we have the encoded data
-if hasattr(st.session_state, 'df_train_encoded') and hasattr(st.session_state, 'df_test_encoded'):
-    # Check for missing values in target
-    if st.session_state.target:
-        # FIXED: Check if target was encoded and handle missing values properly
-        if (st.session_state.target in st.session_state.get('encoded_cols', set()) and 
-            hasattr(st.session_state, 'safe_encoders') and 
-            st.session_state.target in st.session_state.safe_encoders):
-            
-            # Target was encoded - check for encoded missing values using na_code
-            encoder = st.session_state.safe_encoders[st.session_state.target]
-            na_code = encoder.get('na_code')
-            
-            if na_code is not None:
-                # Count rows with the na_code (encoded missing values)
-                train_target_missing = (st.session_state.df_train_encoded[st.session_state.target] == na_code).sum()
-                test_target_missing = (st.session_state.df_test_encoded[st.session_state.target] == na_code).sum()
-            else:
-                # No missing values were encoded
-                train_target_missing = 0
-                test_target_missing = 0
-        else:
-            # Target was not encoded - check for actual NaN values
-            train_target_missing = st.session_state.df_train_encoded[st.session_state.target].isna().sum()
-            test_target_missing = st.session_state.df_test_encoded[st.session_state.target].isna().sum()
-            
-        total_missing = train_target_missing + test_target_missing
-        
-        if total_missing > 0:
-            st.error(f"⚠️ **CRITICAL ISSUE**: {total_missing} missing values detected in target variable!")
-            st.error(f"Training set: {train_target_missing} missing, Test set: {test_target_missing} missing")
-            st.error("Cross-validation cannot proceed with missing target values.")
-            
-            # Debug information
-            with st.expander("🔍 Debug Information", expanded=False):
-                target_encoded = st.session_state.target in st.session_state.get('encoded_cols', set())
-                st.write(f"**Target column:** {st.session_state.target}")
-                st.write(f"**Target was encoded:** {target_encoded}")
-                if target_encoded and hasattr(st.session_state, 'safe_encoders'):
-                    encoder = st.session_state.safe_encoders.get(st.session_state.target, {})
-                    na_code = encoder.get('na_code')
-                    st.write(f"**Missing value code (na_code):** {na_code}")
-                    if na_code is not None:
-                        st.write(f"**Values equal to na_code in train:** {(st.session_state.df_train_encoded[st.session_state.target] == na_code).sum()}")
-                        st.write(f"**Values equal to na_code in test:** {(st.session_state.df_test_encoded[st.session_state.target] == na_code).sum()}")
-                st.write(f"**Target dtype:** {st.session_state.df_train_encoded[st.session_state.target].dtype}")
-                st.write(f"**Unique values in target:** {sorted(st.session_state.df_train_encoded[st.session_state.target].unique())}")
-            
-            with st.expander("🔧 Missing Target Value Solutions", expanded=True):
-                st.write("**Option 1: Remove rows with missing targets (Recommended)**")
-                st.write("- Pros: Clean, no assumptions about missing data")
-                st.write("- Cons: Reduces dataset size")
-                
-                st.write("**Option 2: Impute missing targets**")
-                st.write("- Pros: Keeps all data")
-                st.write("- Cons: May introduce bias, questionable for supervised learning")
-                
-                # Option 1: Remove missing targets
-                if st.button("Remove Rows with Missing Targets", type="primary"):
-                    # FIXED: Handle both encoded and non-encoded missing values
-                    if (st.session_state.target in st.session_state.get('encoded_cols', set()) and 
-                        hasattr(st.session_state, 'safe_encoders') and 
-                        st.session_state.target in st.session_state.safe_encoders):
-                        
-                        # Target was encoded - remove rows with na_code
-                        encoder = st.session_state.safe_encoders[st.session_state.target]
-                        na_code = encoder.get('na_code')
-                        
-                        if na_code is not None:
-                            train_mask = st.session_state.df_train_encoded[st.session_state.target] != na_code
-                            test_mask = st.session_state.df_test_encoded[st.session_state.target] != na_code
-                        else:
-                            train_mask = pd.Series([True] * len(st.session_state.df_train_encoded))
-                            test_mask = pd.Series([True] * len(st.session_state.df_test_encoded))
-                    else:
-                        # Target was not encoded - remove rows with NaN
-                        train_mask = ~st.session_state.df_train_encoded[st.session_state.target].isna()
-                        test_mask = ~st.session_state.df_test_encoded[st.session_state.target].isna()
-                    
-                    # Apply masks to remove rows
-                    st.session_state.df_train_encoded = st.session_state.df_train_encoded[train_mask].reset_index(drop=True)
-                    st.session_state.df_test_encoded = st.session_state.df_test_encoded[test_mask].reset_index(drop=True)
-                    
-                    st.success(f"✅ Removed {total_missing} rows with missing targets!")
-                    st.success(f"New dataset size: {len(st.session_state.df_train_encoded)} train + {len(st.session_state.df_test_encoded)} test")
-                    st.rerun()
-                
-                # Option 2: Impute missing targets (for classification - use mode)
-                st.write("---")
-                if st.button("Impute Missing Targets with Most Frequent Value", type="secondary"):
-                    # FIXED: Handle both encoded and non-encoded missing values for imputation
-                    if (st.session_state.target in st.session_state.get('encoded_cols', set()) and 
-                        hasattr(st.session_state, 'safe_encoders') and 
-                        st.session_state.target in st.session_state.safe_encoders):
-                        
-                        # Target was encoded - replace na_code with mode
-                        encoder = st.session_state.safe_encoders[st.session_state.target]
-                        na_code = encoder.get('na_code')
-                        
-                        if na_code is not None:
-                            # Calculate mode from non-missing encoded values
-                            train_target_values = st.session_state.df_train_encoded[st.session_state.target]
-                            valid_values = train_target_values[train_target_values != na_code]
-                            
-                            if len(valid_values) > 0:
-                                mode_value = valid_values.mode().iloc[0]
-                                
-                                # Replace na_code with mode in both sets
-                                st.session_state.df_train_encoded.loc[
-                                    st.session_state.df_train_encoded[st.session_state.target] == na_code, 
-                                    st.session_state.target
-                                ] = mode_value
-                                st.session_state.df_test_encoded.loc[
-                                    st.session_state.df_test_encoded[st.session_state.target] == na_code, 
-                                    st.session_state.target
-                                ] = mode_value
-                                
-                                st.success(f"✅ Imputed {total_missing} missing targets with mode value: {mode_value}")
-                                st.warning("⚠️ Note: Imputing targets may affect model performance and interpretability")
-                                st.rerun()
-                            else:
-                                st.error("Cannot impute - no valid target values found in training set!")
-                        else:
-                            st.info("No missing values to impute in encoded target.")
-                    else:
-                        # Target was not encoded - use standard fillna
-                        train_target_values = st.session_state.df_train_encoded[st.session_state.target].dropna()
-                        if len(train_target_values) > 0:
-                            mode_value = train_target_values.mode().iloc[0]
-                            
-                            # Impute missing values in both sets
-                            st.session_state.df_train_encoded[st.session_state.target].fillna(mode_value, inplace=True)
-                            st.session_state.df_test_encoded[st.session_state.target].fillna(mode_value, inplace=True)
-                            
-                            st.success(f"✅ Imputed {total_missing} missing targets with mode value: {mode_value}")
-                            st.warning("⚠️ Note: Imputing targets may affect model performance and interpretability")
-                            st.rerun()
-                        else:
-                            st.error("Cannot impute - no valid target values found in training set!")
-            
-            st.stop()  # Prevent further execution until missing values are handled
-        else:
-            st.success("✅ No missing values in target variable - ready to proceed!")
-else:
-    st.info("ℹ️ Complete data encoding in Step 4 first")
-    st.stop()
-
-# ===========================
-# Step 6 — Split X (features) and y (target)
+# Step 5 — Split X (features) and y (target)
 # ===========================
 import numpy as np
 from sklearn.model_selection import KFold, StratifiedKFold
@@ -871,20 +632,14 @@ def _compute_metrics_one_fold(y_true, y_pred, proba, classes, label_kind, select
     return m
 
 
-st.subheader("Step 6: Create X and y from Split Data")
+st.subheader("Step 5: Create X and y")
 if st.session_state.target is None or len(st.session_state.base_features) == 0:
-    st.warning("Please choose base features and a single target in Step 5 to continue.")
+    st.warning("Please choose base features and a single target in Step 4 to continue.")
     st.stop()
 
-# Build X and y from the split encoded data
-st.session_state.y_train = st.session_state.df_train_encoded[st.session_state.target]
-st.session_state.X_train_df = st.session_state.df_train_encoded[st.session_state.base_features].copy()
-st.session_state.y_test = st.session_state.df_test_encoded[st.session_state.target]
-st.session_state.X_test_df = st.session_state.df_test_encoded[st.session_state.base_features].copy()
-
-# Also keep the combined versions for cross-validation (which does its own splitting)
-st.session_state.y = pd.concat([st.session_state.y_train, st.session_state.y_test])
-st.session_state.X_df = pd.concat([st.session_state.X_train_df, st.session_state.X_test_df])
+# Build X and y from the user's choices
+st.session_state.y = st.session_state.df[st.session_state.target]
+st.session_state.X_df = st.session_state.df[st.session_state.base_features].copy()
 
 # Reconfirmation printout
 with st.expander("Reconfirm selections", expanded=True):
@@ -1100,7 +855,7 @@ CLASSIFICATION_MODELS = [
 ]
 REGRESSION_MODELS = ["xgboost", "lightgbm", "catboost", "lin_reg", "ridge_reg"]
 
-st.subheader("Step 7: Choose Model & Hyperparameters")
+st.subheader("Step 8: Choose Model & Hyperparameters")
 use_gpu = st.checkbox("Use GPU (if available)", value=False)
 model_list = CLASSIFICATION_MODELS if st.session_state.task_type == "classification" else REGRESSION_MODELS
 
@@ -1257,7 +1012,7 @@ if st.session_state.task_type == "classification":
         metric_pool = sorted(set(BOTH_CLF + MULTICLASS_ONLY))
         default_primary = "Macro F1"
 
-    st.subheader("Step 8: Choose Metrics (exactly 4)")
+    st.subheader("Step 9: Choose Metrics (exactly 4)")
     st.caption(f"Detected label type: **{detected_kind}** — showing relevant metrics.")
 
     primary_metric = st.selectbox("Primary metric", options=metric_pool,
@@ -1281,7 +1036,7 @@ if st.session_state.task_type == "classification":
     st.session_state.extra_metrics = extra_metrics
     st.session_state.selected_metrics = [primary_metric] + extra_metrics
 else:
-    st.subheader("Step 8: Metrics")
+    st.subheader("Step 9: Metrics")
     st.info("Regression metrics selection will be added in the next step you requested.")
 
 # ===========================
@@ -1297,7 +1052,7 @@ from sklearn.metrics import (
 from sklearn.preprocessing import label_binarize
 import numpy as np
 
-st.subheader("Step 9: Evaluate Model with Selected Metrics")
+st.subheader("Step 10: Evaluate Model with Selected Metrics")
 
 # Guardrails
 if st.session_state.task_type != "classification":
@@ -1331,51 +1086,10 @@ else:
         with st.expander("Data Quality Report", expanded=True):
             # Check for data issues
             st.write(f"**Dataset shape:** {X.shape[0]} rows × {X.shape[1]} features")
-            
-            # FIXED: Handle target distribution properly for encoded vs non-encoded targets
-            if (hasattr(st.session_state, 'target') and st.session_state.target and
-                st.session_state.target in st.session_state.get('encoded_cols', set()) and
-                hasattr(st.session_state, 'safe_encoders') and 
-                st.session_state.target in st.session_state.safe_encoders):
-                
-                # Target was encoded - show encoded distribution
-                encoder = st.session_state.safe_encoders[st.session_state.target]
-                na_code = encoder.get('na_code')
-                
-                if na_code is not None:
-                    # Filter out missing values for distribution display
-                    valid_mask = y != na_code
-                    valid_y = y[valid_mask]
-                    if len(valid_y) > 0:
-                        st.write(f"**Target distribution (excluding missing):** {dict(zip(*np.unique(valid_y, return_counts=True)))}")
-                        st.write(f"**Missing values (encoded as {na_code}):** {(y == na_code).sum()} values")
-                    else:
-                        st.write(f"**Target distribution:** All values are missing (encoded as {na_code})")
-                else:
-                    st.write(f"**Target distribution:** {dict(zip(*np.unique(y, return_counts=True)))}")
-            else:
-                # Target was not encoded - show original distribution
-                st.write(f"**Target distribution:** {dict(zip(*np.unique(y, return_counts=True)))}")
+            st.write(f"**Target distribution:** {dict(zip(*np.unique(y, return_counts=True)))}")
 
-            # Check for class imbalance (using valid values only)
-            if (hasattr(st.session_state, 'target') and st.session_state.target and
-                st.session_state.target in st.session_state.get('encoded_cols', set()) and
-                hasattr(st.session_state, 'safe_encoders') and 
-                st.session_state.target in st.session_state.safe_encoders):
-                
-                encoder = st.session_state.safe_encoders[st.session_state.target]
-                na_code = encoder.get('na_code')
-                
-                if na_code is not None:
-                    # Use only valid (non-missing) values for imbalance check
-                    valid_mask = y != na_code
-                    unique_y, counts_y = np.unique(y[valid_mask], return_counts=True)
-                else:
-                    unique_y, counts_y = np.unique(y, return_counts=True)
-            else:
-                # Target not encoded - use all values
-                unique_y, counts_y = np.unique(y, return_counts=True)
-            
+            # Check for class imbalance
+            unique_y, counts_y = np.unique(y, return_counts=True)
             if len(unique_y) > 1:
                 min_class_ratio = min(counts_y) / sum(counts_y)
                 if min_class_ratio < 0.05:
@@ -1385,29 +1099,18 @@ else:
                 elif min_class_ratio < 0.1:
                     st.warning(f"⚠️ **CLASS IMBALANCE**: Smallest class represents {min_class_ratio:.2%} of data")
 
-            # Check for missing values (FIXED: Handle encoded missing values)
+            # Check for missing values
             n_missing_X = np.isnan(X).sum()
-            
-            # Check target missing values properly
-            if (hasattr(st.session_state, 'target') and st.session_state.target and
-                st.session_state.target in st.session_state.get('encoded_cols', set()) and
-                hasattr(st.session_state, 'safe_encoders') and 
-                st.session_state.target in st.session_state.safe_encoders):
-                
-                encoder = st.session_state.safe_encoders[st.session_state.target]
-                na_code = encoder.get('na_code')
-                n_missing_y = (y == na_code).sum() if na_code is not None else 0
-            else:
-                n_missing_y = pd.isna(y).sum()
-            
+            n_missing_y = pd.isna(y).sum()
+
             if n_missing_X > 0:
                 st.warning(f"⚠️ **Missing values in features**: {n_missing_X} values")
                 st.info("Consider handling missing values in preprocessing steps")
-            
+
             if n_missing_y > 0:
                 st.warning(f"⚠️ **Missing values in target**: {n_missing_y} values")
-                st.info("💡 **Action Required**: Please go to Step 5.5 to handle missing target values before proceeding with cross-validation")
-                
+                st.info("Missing target values will be handled during training")
+
             if n_missing_X == 0 and n_missing_y == 0:
                 st.success("✅ **No missing values detected** - data is complete!")
 
@@ -1567,9 +1270,9 @@ else:
     # ===========================
     # Step 12 — Train on all data & report metrics
     # ===========================
-    st.subheader("Step 10: Final Model Evaluation on Test Set")
+    st.subheader("Step 12: Train/Test Split & Report Metrics")
 
-    run_full = st.button("Evaluate Final Model on Test Set", type="primary")
+    run_full = st.button("Train Model with Train/Test Split", type="primary")
 
     if run_full:
         # Basic guardrails
@@ -1618,23 +1321,26 @@ else:
 
             # Import train_test_split for proper evaluation
             from sklearn.model_selection import train_test_split
-            
-            # ✅ Use the pre-split data (no leakage!)
-            if hasattr(st.session_state, 'X_train_df') and hasattr(st.session_state, 'X_test_df'):
-                st.success("✅ **Using pre-split data - NO DATA LEAKAGE!**")
-                X_train = st.session_state.X_train_df.values
-                X_test = st.session_state.X_test_df.values
-                y_train = st.session_state.y_train.values
-                y_test = st.session_state.y_test.values
-            else:
-                st.error("❌ **Pre-split data not found!** Please complete Steps 3-6 first.")
-                st.error("The new workflow requires splitting data BEFORE preprocessing.")
-                st.stop()
+
+            # ⚠️ CRITICAL: Split data BEFORE any preprocessing to prevent data leakage!
+            # Get the original dataframe before any encoding was applied
+            if hasattr(st.session_state, 'original_df') and st.session_state.original_df is not None:
+                st.warning("🚨 **DATA LEAKAGE DETECTED**: Categorical encoding was applied to full dataset!")
+                st.warning("For proper evaluation, we should split data BEFORE preprocessing.")
+                st.info(
+                    "Using the already-encoded data for now, but consider re-running from Step 3 with proper splitting.")
+
+            # Split data into train/test sets (80/20 split)
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42,
+                stratify=y if st.session_state.task_type == "classification" else None
+            )
 
             try:
-                total_samples = X_train.shape[0] + X_test.shape[0]
-                st.info(f"Training model on {X_train.shape[0]} samples ({X_train.shape[0]/total_samples:.1%} of data)")
-                st.info(f"Testing on {X_test.shape[0]} samples ({X_test.shape[0]/total_samples:.1%} of data)")
+                st.info(
+                    f"Training model on {X_train.shape[0]} samples ({X_train.shape[0]}/{X.shape[0]} = {X_train.shape[0] / X.shape[0]:.1%} of data)")
+                st.info(
+                    f"Testing on {X_test.shape[0]} samples ({X_test.shape[0]}/{X.shape[0]} = {X_test.shape[0] / X.shape[0]:.1%} of data)")
                 model.fit(X_train, y_train)
                 st.success("Model training completed successfully!")
             except Exception as fit_err:
@@ -1660,15 +1366,17 @@ else:
                     if test_accuracy >= 0.99:
                         st.warning(f"⚠️ **Suspiciously high test accuracy**: {test_accuracy:.4f}")
                         st.warning("This might indicate data leakage or an unusually easy dataset.")
-                        st.error("🚨 **LIKELY DATA LEAKAGE**: Perfect/near-perfect test accuracy suggests the model has seen this data before!")
-                        
+                        st.error(
+                            "🚨 **LIKELY DATA LEAKAGE**: Perfect/near-perfect test accuracy suggests the model has seen this data before!")
+
                         with st.expander("🔍 Data Leakage Diagnostics", expanded=True):
                             st.write("**Common causes of data leakage:**")
-                            st.write("1. **Preprocessing Leakage**: Categorical encoding was done on full dataset before splitting")
+                            st.write(
+                                "1. **Preprocessing Leakage**: Categorical encoding was done on full dataset before splitting")
                             st.write("2. **Feature Leakage**: Features contain information from the future or target")
-                            st.write("3. **Temporal Leakage**: Time-based data not split chronologically") 
+                            st.write("3. **Temporal Leakage**: Time-based data not split chronologically")
                             st.write("4. **ID Leakage**: Unique identifiers or near-duplicates in train/test")
-                            
+
                             st.write("**How to fix:**")
                             st.write("- Split data FIRST, then preprocess train/test separately")
                             st.write("- Check for features that predict the target too perfectly")
