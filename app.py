@@ -26,7 +26,7 @@ st.set_page_config(
 )
 
 st.title("Brute Force Feature Engineering")  # Main title exactly as requested
-st.caption("Upload → Drop Columns → Encode Categoricals → Choose Base Features & Target → Cloose Model → Chose Metrics → Train")  # Quick guide
+st.caption("Upload → Drop Columns → Encode Categoricals → Choose Base Features & Target")  # Quick guide
 
 # ---------------------------
 # Session state initializers
@@ -65,39 +65,21 @@ def _load_dataframe(uploaded_file) -> pd.DataFrame:
 
 def label_encode_columns(df: pd.DataFrame, cols: List[str]) -> Dict[str, Dict]:
     """
-    Convert selected categorical columns to integer codes 0..k-1.
-    Missing values get the next available code (k).
+    Convert selected categorical columns to integer codes 0..k-1; NaNs -> -1.
     Deterministic via pandas.factorize(sort=True).
     """
     metadata: Dict[str, Dict] = {}
     for col in cols:
-        # Get original values to track missing values
-        original_values = df[col].copy()
-        
-        # Use factorize with na_sentinel=None to get codes for non-missing values
-        codes, uniques = pd.factorize(df[col], sort=True, na_sentinel=None)
-        
-        # Handle missing values by assigning them the next available code
-        if pd.isna(original_values).any():
-            max_code = len(uniques) - 1 if len(uniques) > 0 else -1
-            na_code = max_code + 1
-            codes[pd.isna(original_values)] = na_code
-            # Add a placeholder for missing values in uniques
-            uniques = list(uniques) + ['<MISSING>']
-        else:
-            na_code = None
-            
+        # 0..k-1 for present categories, -1 for missing
+        codes, uniques = pd.factorize(df[col], sort=True)
         df[col] = codes.astype("int64")
 
-        # category -> code mapping
-        mapping = {str(u): int(i) for i, u in enumerate(uniques) if u != '<MISSING>'}
-        if na_code is not None:
-            mapping['<MISSING>'] = na_code
-            
+        # category -> 0..k-1 mapping
+        mapping = {str(u): int(i) for i, u in enumerate(uniques)}
         metadata[col] = {
-            "uniques": [str(u) for u in uniques],
+            "uniques": [str(u) for u in uniques.tolist()],
             "mapping": mapping,
-            "na_code": na_code,
+            "na_code": -1,
         }
     return metadata  # Return per-column metadata
 
@@ -154,7 +136,7 @@ with st.expander("View column dtypes", expanded=False):
         {"column": st.session_state.df.columns, "dtype": st.session_state.df.dtypes.astype(str).values})
     st.dataframe(dtypes_table, use_container_width=True)  # Clear overview of dtypes
 
-st.subheader("Step 3: Encode Categorical Columns (to 0, 1, 2, …; NaN → next available code)")
+st.subheader("Step 3: Encode Categorical Columns (to 0, 1, 2, …; NaN → -1)")
 remaining_cols = [c for c in st.session_state.df.columns]  # After any drops
 # Heuristic guess for categoricals: object/category dtypes
 likely_cats = [
@@ -166,7 +148,7 @@ cols_to_encode = st.multiselect(
     "Select categorical columns to convert to integer codes",
     options=remaining_cols,
     default=likely_cats,  # Pre-select likely categoricals
-    help="This performs label encoding (not one-hot). Each unique value → 0..k-1; NaN → k (next available code)."
+    help="This performs label encoding (not one-hot). Each unique value → 0..k-1; NaNs → -1."
 )
 
 apply_encode = st.button("Convert Selected Columns", disabled=(len(cols_to_encode) == 0))
@@ -177,8 +159,7 @@ if apply_encode:
     st.success(f"Converted {len(cols_to_encode)} column(s) to integer codes.")
     with st.expander("Show encoding mappings", expanded=False):
         for col, info in meta.items():
-            na_msg = f"NaN → {info['na_code']}" if info['na_code'] is not None else "No missing values"
-            st.markdown(f"**{col}** — {na_msg}")
+            st.markdown(f"**{col}** — NaN → 0")
             mapping_df = pd.DataFrame(
                 {"category": list(info["mapping"].keys()), "code": list(info["mapping"].values())})
             st.dataframe(mapping_df, use_container_width=True)
@@ -1029,19 +1010,10 @@ else:
                     st.warning(f"⚠️ **CLASS IMBALANCE**: Smallest class represents {min_class_ratio:.2%} of data")
 
             # Check for missing values
-            n_missing_X = np.isnan(X).sum()
-            n_missing_y = pd.isna(y).sum()
-            
-            if n_missing_X > 0:
-                st.warning(f"⚠️ **Missing values in features**: {n_missing_X} values")
-                st.info("Consider handling missing values in preprocessing steps")
-            
-            if n_missing_y > 0:
-                st.warning(f"⚠️ **Missing values in target**: {n_missing_y} values")
-                st.info("Missing target values will be handled during training")
-                
-            if n_missing_X == 0 and n_missing_y == 0:
-                st.success("✅ **No missing values detected** - data is complete!")
+            if np.any(np.isnan(X)):
+                st.error("⚠️ **MISSING VALUES DETECTED** in features - this can cause training issues")
+            if np.any(pd.isna(y)):
+                st.error("⚠️ **MISSING VALUES DETECTED** in target - this will cause training to fail")
 
             # Check for constant features
             constant_features = []
