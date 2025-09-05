@@ -68,6 +68,8 @@ def label_encode_columns(df: pd.DataFrame, cols: List[str]) -> Dict[str, Dict]:
     Convert selected categorical columns to integer codes 0..k-1.
     Missing values get the next available code (k).
     Deterministic via pandas.factorize(sort=True).
+    
+    ⚠️ WARNING: This function causes DATA LEAKAGE if applied to full dataset before train/test split!
     """
     metadata: Dict[str, Dict] = {}
     for col in cols:
@@ -102,6 +104,70 @@ def label_encode_columns(df: pd.DataFrame, cols: List[str]) -> Dict[str, Dict]:
             "na_code": na_code,
         }
     return metadata  # Return per-column metadata
+
+
+def create_safe_encoder(train_df: pd.DataFrame, cols: List[str]) -> Dict[str, Dict]:
+    """
+    Create label encoders fitted only on training data to prevent data leakage.
+    Returns encoding metadata that can be applied to test data.
+    """
+    encoders = {}
+    for col in cols:
+        # Fit encoder only on training data
+        codes, uniques = pd.factorize(train_df[col], sort=True)
+        
+        # Handle missing values
+        has_missing = (codes == -1).any()
+        if has_missing:
+            na_code = len(uniques)
+            uniques = list(uniques) + ['<MISSING>']
+        else:
+            na_code = None
+            
+        # Create mapping
+        mapping = {str(u): int(i) for i, u in enumerate(uniques) if u != '<MISSING>'}
+        if na_code is not None:
+            mapping['<MISSING>'] = na_code
+            
+        encoders[col] = {
+            "uniques": [str(u) for u in uniques],
+            "mapping": mapping,
+            "na_code": na_code,
+        }
+    return encoders
+
+
+def apply_safe_encoding(df: pd.DataFrame, cols: List[str], encoders: Dict[str, Dict]) -> pd.DataFrame:
+    """
+    Apply pre-fitted encoders to dataframe without causing data leakage.
+    Handles unseen categories by assigning them to a special 'unknown' category.
+    """
+    df_encoded = df.copy()
+    
+    for col in cols:
+        if col not in encoders:
+            continue
+            
+        encoder = encoders[col]
+        mapping = encoder["mapping"]
+        na_code = encoder["na_code"]
+        
+        # Create encoded column
+        encoded_values = []
+        for value in df[col]:
+            if pd.isna(value):
+                # Handle missing values
+                encoded_values.append(na_code if na_code is not None else 0)
+            elif str(value) in mapping:
+                # Known category
+                encoded_values.append(mapping[str(value)])
+            else:
+                # Unknown category - assign to missing/unknown code
+                encoded_values.append(na_code if na_code is not None else len(mapping))
+                
+        df_encoded[col] = pd.Series(encoded_values, dtype="int64")
+    
+    return df_encoded
 
 
 # ---------------------------
@@ -157,6 +223,7 @@ with st.expander("View column dtypes", expanded=False):
     st.dataframe(dtypes_table, use_container_width=True)  # Clear overview of dtypes
 
 st.subheader("Step 3: Encode Categorical Columns (to 0, 1, 2, …; NaN → next available code)")
+st.warning("⚠️ **DATA LEAKAGE WARNING**: Encoding the full dataset before train/test split can cause data leakage! For rigorous evaluation, consider splitting data first.")
 remaining_cols = [c for c in st.session_state.df.columns]  # After any drops
 # Heuristic guess for categoricals: object/category dtypes
 likely_cats = [
@@ -1253,6 +1320,13 @@ else:
             # Import train_test_split for proper evaluation
             from sklearn.model_selection import train_test_split
             
+            # ⚠️ CRITICAL: Split data BEFORE any preprocessing to prevent data leakage!
+            # Get the original dataframe before any encoding was applied
+            if hasattr(st.session_state, 'original_df') and st.session_state.original_df is not None:
+                st.warning("🚨 **DATA LEAKAGE DETECTED**: Categorical encoding was applied to full dataset!")
+                st.warning("For proper evaluation, we should split data BEFORE preprocessing.")
+                st.info("Using the already-encoded data for now, but consider re-running from Step 3 with proper splitting.")
+            
             # Split data into train/test sets (80/20 split)
             X_train, X_test, y_train, y_test = train_test_split(
                 X, y, test_size=0.2, random_state=42, 
@@ -1287,6 +1361,19 @@ else:
                     if test_accuracy >= 0.99:
                         st.warning(f"⚠️ **Suspiciously high test accuracy**: {test_accuracy:.4f}")
                         st.warning("This might indicate data leakage or an unusually easy dataset.")
+                        st.error("🚨 **LIKELY DATA LEAKAGE**: Perfect/near-perfect test accuracy suggests the model has seen this data before!")
+                        
+                        with st.expander("🔍 Data Leakage Diagnostics", expanded=True):
+                            st.write("**Common causes of data leakage:**")
+                            st.write("1. **Preprocessing Leakage**: Categorical encoding was done on full dataset before splitting")
+                            st.write("2. **Feature Leakage**: Features contain information from the future or target")
+                            st.write("3. **Temporal Leakage**: Time-based data not split chronologically") 
+                            st.write("4. **ID Leakage**: Unique identifiers or near-duplicates in train/test")
+                            
+                            st.write("**How to fix:**")
+                            st.write("- Split data FIRST, then preprocess train/test separately")
+                            st.write("- Check for features that predict the target too perfectly")
+                            st.write("- Ensure no information from test set leaks into training")
 
                     # Show prediction details
                     with st.expander("🔍 Detailed Prediction Analysis", expanded=False):
