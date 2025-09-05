@@ -26,7 +26,7 @@ st.set_page_config(
 )
 
 st.title("Brute Force Feature Engineering")  # Main title exactly as requested
-st.caption("Upload → Drop Columns → Encode Categoricals → Choose Base Features & Target")  # Quick guide
+st.caption("Upload → Drop Columns → Encode Categoricals → Choose Base Features & Target → Cloose Model → Chose Metrics → Train")  # Quick guide
 
 # ---------------------------
 # Session state initializers
@@ -65,21 +65,41 @@ def _load_dataframe(uploaded_file) -> pd.DataFrame:
 
 def label_encode_columns(df: pd.DataFrame, cols: List[str]) -> Dict[str, Dict]:
     """
-    Convert selected categorical columns to integer codes 0..k-1; NaNs -> -1.
+    Convert selected categorical columns to integer codes 0..k-1.
+    Missing values get the next available code (k).
     Deterministic via pandas.factorize(sort=True).
     """
     metadata: Dict[str, Dict] = {}
     for col in cols:
-        # 0..k-1 for present categories, -1 for missing
+        # Get original values to track missing values
+        original_values = df[col].copy()
+        
+        # Use factorize - it will assign -1 to NaN by default
         codes, uniques = pd.factorize(df[col], sort=True)
+        
+        # Check if there are missing values (codes == -1)
+        has_missing = (codes == -1).any()
+        
+        if has_missing:
+            # Reassign missing values to the next available code
+            na_code = len(uniques)  # Next available code after 0..k-1
+            codes[codes == -1] = na_code
+            # Add a placeholder for missing values in uniques
+            uniques = list(uniques) + ['<MISSING>']
+        else:
+            na_code = None
+            
         df[col] = codes.astype("int64")
 
-        # category -> 0..k-1 mapping
-        mapping = {str(u): int(i) for i, u in enumerate(uniques)}
+        # category -> code mapping
+        mapping = {str(u): int(i) for i, u in enumerate(uniques) if u != '<MISSING>'}
+        if na_code is not None:
+            mapping['<MISSING>'] = na_code
+            
         metadata[col] = {
-            "uniques": [str(u) for u in uniques.tolist()],
+            "uniques": [str(u) for u in uniques],
             "mapping": mapping,
-            "na_code": -1,
+            "na_code": na_code,
         }
     return metadata  # Return per-column metadata
 
@@ -136,7 +156,7 @@ with st.expander("View column dtypes", expanded=False):
         {"column": st.session_state.df.columns, "dtype": st.session_state.df.dtypes.astype(str).values})
     st.dataframe(dtypes_table, use_container_width=True)  # Clear overview of dtypes
 
-st.subheader("Step 3: Encode Categorical Columns (to 0, 1, 2, …; NaN → -1)")
+st.subheader("Step 3: Encode Categorical Columns (to 0, 1, 2, …; NaN → next available code)")
 remaining_cols = [c for c in st.session_state.df.columns]  # After any drops
 # Heuristic guess for categoricals: object/category dtypes
 likely_cats = [
@@ -148,7 +168,7 @@ cols_to_encode = st.multiselect(
     "Select categorical columns to convert to integer codes",
     options=remaining_cols,
     default=likely_cats,  # Pre-select likely categoricals
-    help="This performs label encoding (not one-hot). Each unique value → 0..k-1; NaNs → -1."
+    help="This performs label encoding (not one-hot). Each unique value → 0..k-1; NaN → k (next available code)."
 )
 
 apply_encode = st.button("Convert Selected Columns", disabled=(len(cols_to_encode) == 0))
@@ -159,7 +179,8 @@ if apply_encode:
     st.success(f"Converted {len(cols_to_encode)} column(s) to integer codes.")
     with st.expander("Show encoding mappings", expanded=False):
         for col, info in meta.items():
-            st.markdown(f"**{col}** — NaN → 0")
+            na_msg = f"NaN → {info['na_code']}" if info['na_code'] is not None else "No missing values"
+            st.markdown(f"**{col}** — {na_msg}")
             mapping_df = pd.DataFrame(
                 {"category": list(info["mapping"].keys()), "code": list(info["mapping"].values())})
             st.dataframe(mapping_df, use_container_width=True)
@@ -1010,10 +1031,19 @@ else:
                     st.warning(f"⚠️ **CLASS IMBALANCE**: Smallest class represents {min_class_ratio:.2%} of data")
 
             # Check for missing values
-            if np.any(np.isnan(X)):
-                st.error("⚠️ **MISSING VALUES DETECTED** in features - this can cause training issues")
-            if np.any(pd.isna(y)):
-                st.error("⚠️ **MISSING VALUES DETECTED** in target - this will cause training to fail")
+            n_missing_X = np.isnan(X).sum()
+            n_missing_y = pd.isna(y).sum()
+            
+            if n_missing_X > 0:
+                st.warning(f"⚠️ **Missing values in features**: {n_missing_X} values")
+                st.info("Consider handling missing values in preprocessing steps")
+            
+            if n_missing_y > 0:
+                st.warning(f"⚠️ **Missing values in target**: {n_missing_y} values")
+                st.info("Missing target values will be handled during training")
+                
+            if n_missing_X == 0 and n_missing_y == 0:
+                st.success("✅ **No missing values detected** - data is complete!")
 
             # Check for constant features
             constant_features = []
@@ -1171,9 +1201,9 @@ else:
     # ===========================
     # Step 12 — Train on all data & report metrics
     # ===========================
-    st.subheader("Step 12: Train on all data & report metrics")
+    st.subheader("Step 12: Train/Test Split & Report Metrics")
 
-    run_full = st.button("Run Model on Full Dataset", type="primary")
+    run_full = st.button("Train Model with Train/Test Split", type="primary")
 
     if run_full:
         # Basic guardrails
@@ -1220,49 +1250,59 @@ else:
             y = st.session_state.y.values
             model = clone(st.session_state.estimator)
 
+            # Import train_test_split for proper evaluation
+            from sklearn.model_selection import train_test_split
+            
+            # Split data into train/test sets (80/20 split)
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.2, random_state=42, 
+                stratify=y if st.session_state.task_type == "classification" else None
+            )
+
             try:
-                st.info(f"Training model on full dataset: {X.shape[0]} samples, {X.shape[1]} features")
-                model.fit(X, y)
+                st.info(f"Training model on {X_train.shape[0]} samples ({X_train.shape[0]}/{X.shape[0]} = {X_train.shape[0]/X.shape[0]:.1%} of data)")
+                st.info(f"Testing on {X_test.shape[0]} samples ({X_test.shape[0]}/{X.shape[0]} = {X_test.shape[0]/X.shape[0]:.1%} of data)")
+                model.fit(X_train, y_train)
                 st.success("Model training completed successfully!")
             except Exception as fit_err:
                 st.error(f"Model fit failed: {fit_err}")
             else:
                 try:
-                    yhat = model.predict(X)
+                    yhat = model.predict(X_test)  # Predict on test set, not training set!
 
                     # Critical debugging information
                     st.info(f"Prediction completed. Shape: {yhat.shape}")
-                    st.info(f"Unique values in y (true): {np.unique(y)}")
+                    st.info(f"Unique values in y_test (true): {np.unique(y_test)}")
                     st.info(f"Unique values in yhat (predicted): {np.unique(yhat)}")
 
                     # Check if model is just predicting one class
                     if len(np.unique(yhat)) == 1:
                         st.error(f"⚠️ **PROBLEM DETECTED**: Model is predicting only one class: {np.unique(yhat)[0]}")
                         st.error(
-                            "This explains why you're getting perfect accuracy (1.0) - the model isn't learning properly!")
+                            "This could indicate a problem with the model or data preprocessing!")
 
-                    # Check for perfect predictions (overfitting indicator)
-                    accuracy = np.mean(y == yhat)
-                    if accuracy >= 0.99:
-                        st.warning(f"⚠️ **OVERFITTING DETECTED**: Training accuracy = {accuracy:.4f}")
-                        st.warning(
-                            "Perfect or near-perfect training accuracy often indicates overfitting or data leakage.")
+                    # Check test set accuracy (this should be realistic now)
+                    test_accuracy = np.mean(y_test == yhat)
+                    st.info(f"✅ **Test Set Accuracy**: {test_accuracy:.4f}")
+                    if test_accuracy >= 0.99:
+                        st.warning(f"⚠️ **Suspiciously high test accuracy**: {test_accuracy:.4f}")
+                        st.warning("This might indicate data leakage or an unusually easy dataset.")
 
                     # Show prediction details
                     with st.expander("🔍 Detailed Prediction Analysis", expanded=False):
-                        st.write("**First 20 predictions vs actual:**")
+                        st.write("**First 20 test predictions vs actual:**")
                         comparison_df = pd.DataFrame({
-                            'Actual': y[:20],
+                            'Actual': y_test[:20],
                             'Predicted': yhat[:20],
-                            'Correct': y[:20] == yhat[:20]
+                            'Correct': y_test[:20] == yhat[:20]
                         })
                         st.dataframe(comparison_df)
 
-                        st.write("**Prediction Summary:**")
-                        st.write(f"- Total samples: {len(y)}")
-                        st.write(f"- Correct predictions: {np.sum(y == yhat)}")
-                        st.write(f"- Incorrect predictions: {np.sum(y != yhat)}")
-                        st.write(f"- Accuracy: {accuracy:.4f}")
+                        st.write("**Test Set Prediction Summary:**")
+                        st.write(f"- Total test samples: {len(y_test)}")
+                        st.write(f"- Correct predictions: {np.sum(y_test == yhat)}")
+                        st.write(f"- Incorrect predictions: {np.sum(y_test != yhat)}")
+                        st.write(f"- Test accuracy: {np.mean(y_test == yhat):.4f}")
 
                         # Check for systematic prediction patterns
                         if len(np.unique(yhat)) == 1:
@@ -1277,7 +1317,7 @@ else:
 
                 if st.session_state.task_type == "classification" and yhat is not None:
                     # Collect probabilities if available
-                    proba, classes = _predict_proba_like(model, X)
+                    proba, classes = _predict_proba_like(model, X_test)
                     # Pull selected metrics from Step 9
                     selected = st.session_state.get("selected_metrics", [])
                     if not isinstance(selected, list) or len(selected) == 0:
@@ -1422,9 +1462,9 @@ else:
                                         m[name] = np.nan
                                 return m
                         # Compute and display
-                        unique_labels = np.unique(y[~pd.isnull(y)])
+                        unique_labels = np.unique(y_test[~pd.isnull(y_test)])
                         metrics_full = _compute_metrics_one_fold(
-                            y_true=y,
+                            y_true=y_test,
                             y_pred=yhat,
                             proba=proba,
                             classes=(classes if classes is not None else unique_labels),
@@ -1434,7 +1474,7 @@ else:
                         # Order columns by user's selection
                         ordered = {k: metrics_full.get(k, np.nan) for k in selected}
                         res_df = pd.DataFrame([ordered])
-                        st.subheader("Metrics on Training Data (fit on all rows)")
+                        st.subheader("Classification Metrics on Test Data (80/20 split)")
                         st.dataframe(res_df, use_container_width=True)
                         st.download_button(
                             "Download metrics (CSV)",
@@ -1449,16 +1489,16 @@ else:
                     from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
                     # RMSE
-                    rmse = sqrt(mean_squared_error(y, yhat))
-                    mae = mean_absolute_error(y, yhat)
-                    r2 = r2_score(y, yhat)
+                    rmse = sqrt(mean_squared_error(y_test, yhat))
+                    mae = mean_absolute_error(y_test, yhat)
+                    r2 = r2_score(y_test, yhat)
                     # Safe MAPE (ignore zeros in denominator)
-                    denom = np.where(np.abs(y) < 1e-8, np.nan, np.abs(y))
-                    mape = float(np.nanmean(np.abs((y - yhat) / denom)) * 100.0)
+                    denom = np.where(np.abs(y_test) < 1e-8, np.nan, np.abs(y_test))
+                    mape = float(np.nanmean(np.abs((y_test - yhat) / denom)) * 100.0)
                     reg_df = pd.DataFrame([
                         {"RMSE": rmse, "MAE": mae, "R²": r2, "MAPE (%)": mape}
                     ])
-                    st.subheader("Regression Metrics on Training Data (fit on all rows)")
+                    st.subheader("Regression Metrics on Test Data (80/20 split)")
                     st.dataframe(reg_df, use_container_width=True)
                     st.download_button(
                         "Download regression metrics (CSV)",
