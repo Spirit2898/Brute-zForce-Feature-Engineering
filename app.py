@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 st.title("Brute Force Feature Engineering")  # Main title exactly as requested
-st.caption("Upload → Drop Columns → Encode Categoricals → Choose Base Features & Target → Cloose Model → Chose Metrics → Train")  # Quick guide
+st.caption("Upload → Drop Columns → Split Data → Encode Categoricals → Choose Features & Target → Handle Missing Targets → Choose Model → Choose Metrics → Train")  # Quick guide
 
 # ---------------------------
 # Session state initializers
@@ -435,7 +435,73 @@ else:
 
 
 # ===========================
-# Step 5 — Split X (features) and y (target)
+# Step 5.5 — Handle Missing Values in Target (Critical Fix)
+# ===========================
+st.subheader("Step 5.5: Handle Missing Target Values")
+
+# Check if we have the encoded data
+if hasattr(st.session_state, 'df_train_encoded') and hasattr(st.session_state, 'df_test_encoded'):
+    # Check for missing values in target
+    if st.session_state.target:
+        train_target_missing = st.session_state.df_train_encoded[st.session_state.target].isna().sum()
+        test_target_missing = st.session_state.df_test_encoded[st.session_state.target].isna().sum()
+        total_missing = train_target_missing + test_target_missing
+        
+        if total_missing > 0:
+            st.error(f"⚠️ **CRITICAL ISSUE**: {total_missing} missing values detected in target variable!")
+            st.error(f"Training set: {train_target_missing} missing, Test set: {test_target_missing} missing")
+            st.error("Cross-validation cannot proceed with missing target values.")
+            
+            with st.expander("🔧 Missing Target Value Solutions", expanded=True):
+                st.write("**Option 1: Remove rows with missing targets (Recommended)**")
+                st.write("- Pros: Clean, no assumptions about missing data")
+                st.write("- Cons: Reduces dataset size")
+                
+                st.write("**Option 2: Impute missing targets**")
+                st.write("- Pros: Keeps all data")
+                st.write("- Cons: May introduce bias, questionable for supervised learning")
+                
+                # Option 1: Remove missing targets
+                if st.button("Remove Rows with Missing Targets", type="primary"):
+                    # Remove missing targets from training set
+                    train_mask = ~st.session_state.df_train_encoded[st.session_state.target].isna()
+                    st.session_state.df_train_encoded = st.session_state.df_train_encoded[train_mask].reset_index(drop=True)
+                    
+                    # Remove missing targets from test set
+                    test_mask = ~st.session_state.df_test_encoded[st.session_state.target].isna()
+                    st.session_state.df_test_encoded = st.session_state.df_test_encoded[test_mask].reset_index(drop=True)
+                    
+                    st.success(f"✅ Removed {total_missing} rows with missing targets!")
+                    st.success(f"New dataset size: {len(st.session_state.df_train_encoded)} train + {len(st.session_state.df_test_encoded)} test")
+                    st.rerun()
+                
+                # Option 2: Impute missing targets (for classification - use mode)
+                st.write("---")
+                if st.button("Impute Missing Targets with Most Frequent Value", type="secondary"):
+                    # Calculate mode from training set only (to avoid data leakage)
+                    train_target_values = st.session_state.df_train_encoded[st.session_state.target].dropna()
+                    if len(train_target_values) > 0:
+                        mode_value = train_target_values.mode().iloc[0]
+                        
+                        # Impute missing values in both sets
+                        st.session_state.df_train_encoded[st.session_state.target].fillna(mode_value, inplace=True)
+                        st.session_state.df_test_encoded[st.session_state.target].fillna(mode_value, inplace=True)
+                        
+                        st.success(f"✅ Imputed {total_missing} missing targets with mode value: {mode_value}")
+                        st.warning("⚠️ Note: Imputing targets may affect model performance and interpretability")
+                        st.rerun()
+                    else:
+                        st.error("Cannot impute - no valid target values found in training set!")
+            
+            st.stop()  # Prevent further execution until missing values are handled
+        else:
+            st.success("✅ No missing values in target variable - ready to proceed!")
+else:
+    st.info("ℹ️ Complete data encoding in Step 4 first")
+    st.stop()
+
+# ===========================
+# Step 6 — Split X (features) and y (target)
 # ===========================
 import numpy as np
 from sklearn.model_selection import KFold, StratifiedKFold
