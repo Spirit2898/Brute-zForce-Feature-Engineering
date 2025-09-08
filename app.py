@@ -256,6 +256,67 @@ st.session_state.target = st.selectbox(
     key="target_selector"
 )
 
+# IMMEDIATE MISSING VALUE CHECK for selected target
+if st.session_state.target:
+    target_col = st.session_state.df[st.session_state.target]
+    target_nan_count = target_col.isna().sum()
+    target_total = len(target_col)
+    
+    # Check for encoded missing values too
+    encoded_missing_count = 0
+    if st.session_state.target in st.session_state.get('encoded_cols', set()):
+        if hasattr(st.session_state, 'encoders') and st.session_state.target in st.session_state.encoders:
+            encoder_info = st.session_state.encoders[st.session_state.target]
+            na_code = encoder_info.get('na_code')
+            if na_code is not None:
+                encoded_missing_count = (target_col == na_code).sum()
+    
+    total_missing = target_nan_count + encoded_missing_count
+    
+    if total_missing > 0:
+        st.error(f"🚨 **TARGET HAS MISSING VALUES**: {total_missing}/{target_total} ({total_missing/target_total:.1%}) missing values detected!")
+        st.error("**sklearn cannot handle missing values in the target variable**")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🗑️ Remove Rows with Missing Target", type="primary"):
+                if target_nan_count > 0:
+                    # Remove rows with NaN
+                    mask = ~target_col.isna()
+                    st.session_state.df = st.session_state.df[mask].reset_index(drop=True)
+                    st.success(f"✅ Removed {target_nan_count} rows with NaN target values")
+                
+                if encoded_missing_count > 0:
+                    # Remove rows with encoded missing values
+                    mask = target_col != na_code
+                    st.session_state.df = st.session_state.df[mask].reset_index(drop=True)
+                    st.success(f"✅ Removed {encoded_missing_count} rows with encoded missing target values")
+                
+                st.rerun()  # Refresh to show updated data
+        
+        with col2:
+            if st.button("🔧 Impute Missing Target with Mode", type="secondary"):
+                target_mode = target_col.mode()
+                if len(target_mode) > 0:
+                    mode_value = target_mode[0]
+                    if target_nan_count > 0:
+                        st.session_state.df[st.session_state.target] = target_col.fillna(mode_value)
+                        st.success(f"✅ Imputed {target_nan_count} NaN values with mode: {mode_value}")
+                    
+                    if encoded_missing_count > 0:
+                        # Replace encoded missing values with mode
+                        st.session_state.df.loc[target_col == na_code, st.session_state.target] = mode_value
+                        st.success(f"✅ Imputed {encoded_missing_count} encoded missing values with mode: {mode_value}")
+                    
+                    st.rerun()  # Refresh to show updated data
+                else:
+                    st.error("Cannot determine mode - target has no valid values")
+        
+        st.warning("⚠️ **Please fix missing target values before proceeding to model training**")
+        
+    else:
+        st.success(f"✅ **Target is clean**: No missing values in '{st.session_state.target}'")
+
 # Step 4b: Auto-populate base features and allow removal
 st.write("**4b. Configure Base Features**")
 if st.session_state.target:
@@ -293,6 +354,77 @@ if st.session_state.target:
         help="All non-target columns are selected by default. Remove any you don't want to use.",
         key="base_features_selector"
     )
+
+    # IMMEDIATE MISSING VALUE CHECK for selected features
+    if st.session_state.base_features:
+        st.write("**🔍 Feature Missing Value Analysis:**")
+        
+        features_with_missing = []
+        total_feature_missing = 0
+        
+        for feature in st.session_state.base_features:
+            feature_col = st.session_state.df[feature]
+            feature_nan_count = feature_col.isna().sum()
+            
+            # Check for encoded missing values
+            encoded_missing_count = 0
+            if feature in st.session_state.get('encoded_cols', set()):
+                if hasattr(st.session_state, 'encoders') and feature in st.session_state.encoders:
+                    encoder_info = st.session_state.encoders[feature]
+                    na_code = encoder_info.get('na_code')
+                    if na_code is not None:
+                        encoded_missing_count = (feature_col == na_code).sum()
+            
+            feature_total_missing = feature_nan_count + encoded_missing_count
+            total_feature_missing += feature_total_missing
+            
+            if feature_total_missing > 0:
+                features_with_missing.append({
+                    'feature': feature,
+                    'missing_count': feature_total_missing,
+                    'missing_pct': feature_total_missing / len(feature_col) * 100
+                })
+        
+        if features_with_missing:
+            st.warning(f"⚠️ **FEATURES WITH MISSING VALUES**: {len(features_with_missing)} features have missing data")
+            
+            # Show details in a nice table
+            missing_df = pd.DataFrame(features_with_missing)
+            missing_df['missing_pct'] = missing_df['missing_pct'].round(1)
+            st.dataframe(
+                missing_df.rename(columns={
+                    'feature': 'Feature',
+                    'missing_count': 'Missing Count',
+                    'missing_pct': 'Missing %'
+                }),
+                use_container_width=True
+            )
+            
+            st.info("💡 **Note**: sklearn can handle missing values in features for some models (like tree-based), but others may fail")
+            st.info("Consider removing features with high missing rates or imputing missing values")
+            
+            # Quick action buttons
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🗑️ Remove Features with >20% Missing"):
+                    high_missing_features = [f['feature'] for f in features_with_missing if f['missing_pct'] > 20]
+                    if high_missing_features:
+                        st.session_state.base_features = [f for f in st.session_state.base_features if f not in high_missing_features]
+                        st.success(f"✅ Removed {len(high_missing_features)} features with >20% missing values")
+                        st.rerun()
+                    else:
+                        st.info("No features have >20% missing values")
+            
+            with col2:
+                if st.button("🔧 Show Imputation Options"):
+                    st.info("**Imputation strategies:**")
+                    st.write("- **Numerical features**: Mean, median, or constant value")
+                    st.write("- **Categorical features**: Mode or constant value")
+                    st.write("- **Advanced**: KNN imputation or iterative imputation")
+                    st.write("Consider using sklearn's SimpleImputer or IterativeImputer")
+        
+        else:
+            st.success(f"✅ **All features are clean**: No missing values in {len(st.session_state.base_features)} selected features")
 
     # Summary box
     st.success(
@@ -1066,8 +1198,76 @@ else:
         est = st.session_state.estimator
         metrics_to_compute = st.session_state.selected_metrics
 
+        # CRITICAL: Validate data before CV to prevent sklearn errors
+        st.subheader("🔍 Data Validation & Quality Analysis")
+        
+        # Check for NaN/Inf values that cause sklearn to fail
+        # Use pandas-based detection to handle mixed data types safely
+        X_df_check = st.session_state.X_df  # Use the DataFrame version for mixed type safety
+        y_series_check = st.session_state.y  # Use the Series version
+        
+        # Count NaN values using pandas (handles mixed types)
+        X_nan_count = X_df_check.isna().sum().sum()  # Sum across all columns and rows
+        y_nan_count = y_series_check.isna().sum()
+        
+        # For infinity, we need to handle mixed types carefully
+        X_inf_count = 0
+        y_inf_count = 0
+        
+        # Check for infinity only in numeric columns
+        numeric_cols = X_df_check.select_dtypes(include=[np.number]).columns
+        if len(numeric_cols) > 0:
+            X_inf_count = np.isinf(X_df_check[numeric_cols]).sum().sum()
+        
+        # Check y for infinity (only if numeric)
+        if pd.api.types.is_numeric_dtype(y_series_check):
+            y_inf_count = np.isinf(y_series_check).sum()
+        
+        # Check for encoded missing values in target
+        encoded_missing_count = 0
+        if st.session_state.target in st.session_state.get('encoded_cols', set()):
+            if hasattr(st.session_state, 'encoders') and st.session_state.target in st.session_state.encoders:
+                encoder_info = st.session_state.encoders[st.session_state.target]
+                na_code = encoder_info.get('na_code')
+                if na_code is not None:
+                    encoded_missing_count = (y == na_code).sum()
+        
+        # Display validation results
+        with st.expander("🚨 **CRITICAL Data Validation**", expanded=True):
+            st.write("**NaN/Inf Detection:**")
+            st.write(f"- Features (X): {X_nan_count} NaN, {X_inf_count} Inf values")
+            st.write(f"- Target (y): {y_nan_count} NaN, {y_inf_count} Inf values")
+            
+            if encoded_missing_count > 0:
+                st.write(f"- Target encoded missing values: {encoded_missing_count}")
+            
+            total_issues = X_nan_count + X_inf_count + y_nan_count + y_inf_count + encoded_missing_count
+            
+            if total_issues > 0:
+                st.error(f"🚨 **VALIDATION FAILED**: Found {total_issues} problematic values!")
+                st.error("**These will cause sklearn cross-validation to fail with ValueError**")
+                
+                st.write("**🔧 Required Actions:**")
+                if y_nan_count > 0 or encoded_missing_count > 0:
+                    st.error("1. **Fix target missing values** - sklearn cannot handle missing targets")
+                    st.write("   - Remove rows with missing targets, OR")
+                    st.write("   - Impute missing targets with mode/median")
+                
+                if X_nan_count > 0:
+                    st.error("2. **Fix feature missing values**")
+                    st.write("   - Remove rows with missing features, OR")
+                    st.write("   - Impute with mean/median/mode")
+                
+                if X_inf_count > 0 or y_inf_count > 0:
+                    st.error("3. **Fix infinite values**")
+                    st.write("   - Check for division by zero or log(0)")
+                    st.write("   - Cap extreme values or remove problematic rows")
+                
+                st.stop()  # Stop execution until issues are fixed
+            else:
+                st.success("✅ **Validation PASSED** - No problematic values detected")
+
         # Data quality checks
-        st.subheader("🔍 Data Quality Analysis")
         with st.expander("Data Quality Report", expanded=True):
             # Check for data issues
             st.write(f"**Dataset shape:** {X.shape[0]} rows × {X.shape[1]} features")
@@ -1586,5 +1786,3 @@ else:
                         mime="text/csv",
                     )
                     st.session_state.train_full_regression_metrics = reg_df
-
-
